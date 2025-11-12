@@ -6,7 +6,7 @@ import '@react-native-firebase/app';
 import {
   BackHandler, StyleSheet, Platform, Alert,
   Linking, LogBox, Animated, Easing, StatusBar,
-  PermissionsAndroid,
+  PermissionsAndroid, PixelRatio
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import messaging from '@react-native-firebase/messaging';
@@ -27,6 +27,11 @@ import ImageResizer from 'react-native-image-resizer';
 import { NativeModules } from 'react-native';
 const { KakaoLoginModule } = NativeModules;
 import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// App.js 상단 import들 사이에 추가
+import { Modal, View, Text, Pressable, TouchableWithoutFeedback } from 'react-native';
+import { launchCamera, launchImageLibrary } from 'react-native-image-picker';
+
 
 const APP_VERSION = '1.0.0';
 const BOOT_TIMEOUT_MS = 8000;
@@ -139,6 +144,7 @@ const SOCIAL_MAP = {
   SMS: SOCIAL.SMS,
   KAKAO: 'KAKAO',
   NAVER: 'NAVER',
+  BAND: 'BAND',
   SYSTEM: 'SYSTEM',
 };
 
@@ -253,11 +259,38 @@ async function handleShareToChannel(payload, sendToWeb) {
       const st = await RNFS.stat(dlPath);
       if (!st.isFile() || Number(st.size) <= 0) throw new Error('downloaded-file-empty');
       const fileUrl = `file://${dlPath}`;
-      const kMime = extToMime(kExt) || 'image/*';
-      await Share.open({ title: '카카오톡으로 공유', url: fileUrl, type: kMime, filename: `share.${kExt}`, message: pasteText, failOnCancel: false });
+      // const kMime = extToMime(kExt) || 'image/*';
+      // await Share.open({ title: '카카오톡으로 공유', url: fileUrl, type: kMime, filename: `share.${kExt}`, message: pasteText, failOnCancel: false });
+      const { KakaoShareModule } = NativeModules;
+      await KakaoShareModule.shareImageFile(fileUrl, pasteText);
+
+
       sendToWeb('SHARE_RESULT', { success: true, platform: key, post_id: null });
       return;
-    } else {
+    } else if (key === 'BAND') {
+      const src = data.imageUrl || data.url || data.image;
+      if (!src) throw new Error('no_image_for_band');
+
+      const { uri } = await ensureLocalFile(src, 'jpg'); // file://...
+      const cleanText = buildFinalText(data) || '';
+
+      try {
+        // ✅ 네이티브 모듈로 “밴드만” 실행
+        const { BandShareModule } = NativeModules;
+        await BandShareModule.shareImageWithText(uri, cleanText);
+        sendToWeb('SHARE_RESULT', { success: true, platform: key, post_id: null });
+      } catch (e) {
+        // 미설치면 store로 이동 시도 → 여기로 reject 들어옴
+        sendToWeb('SHARE_RESULT', {
+          success: false, platform: key,
+          error_code: e?.code || 'share_failed',
+          message: String(e?.message || e),
+        });
+      }
+      return;
+    }
+
+     else {
       await Share.open({ url: file, message: text, title: '공유', type: mime, filename: `share.${ext}`, failOnCancel: false });
       sendToWeb('SHARE_RESULT', { success: true, platform: key, post_id: null });
     }
@@ -374,21 +407,75 @@ async function shareToInstagramFeed(payloadOrData = {}, sendToWeb) {
     const src = d.imageUrl || d.url || d.image;
     if (!src) throw new Error('no_image_source');
 
-    // 캡션은 클립보드로만
+    // 1) 캡션은 클립보드만 (인스타는 텍스트 파라미터 무시)
     try {
       const cap = buildFinalText({ caption: d.caption, hashtags: d.hashtags });
       if (cap) Clipboard.setString(cap);
-    } catch { }
+    } catch {}
 
-    // 로컬 JPG 확보
+    // 2) 로컬 JPG 확보 (file://)
+    const { uri, cleanup } = await ensureLocalFile(src, 'jpg');
+
+    // 3) 인스타만 바로 실행 (시스템 공유 시트 X)
+    await Share.shareSingle({
+      social: Share.Social.INSTAGRAM,
+      url: uri,                 // file://...
+      type: 'image/jpeg',
+      filename: 'share.jpg',
+      failOnCancel: false,
+    });
+
+    // 4) 즉시 삭제 금지: IG가 비동기로 읽으므로 약간 뒤에 정리
+    setTimeout(() => { cleanup().catch(() => {}); }, 15000);
+
+    sendToWeb?.('SHARE_RESULT', { success: true, platform: 'INSTAGRAM', post_id: null });
+  } catch (err) {
+    sendToWeb?.('SHARE_RESULT', {
+      success: false,
+      platform: 'INSTAGRAM',
+      error_code: 'share_failed',
+      message: String(err?.message || err),
+    });
+  }
+}
+
+
+// 전제: buildFinalText, ensureLocalPng, Clipboard, Share 가 import되어 있음
+
+// 스토리 버튼도 "인스타만 열기"로 통합 (텍스트/클립보드 없음)
+async function shareToInstagramStories(payloadOrData = {}, sendToWeb) {
+  const TAG = '[IG_STORY_AS_INSTAGRAM]';
+  try {
+    const d = payloadOrData?.data ?? payloadOrData ?? {};
+    const src = d.imageUrl || d.url || d.image;
+    if (!src) throw new Error('no_image_source');
+
+    // JPG 로컬 파일 확보 (인스타 호환 좋음)
     const { uri, cleanup } = await ensureLocalFile(src, 'jpg');
 
     try {
-      await Share.open({ url: uri, type: 'image/jpeg', filename: 'share.jpg', failOnCancel: false });
-    } finally { await cleanup(); }
-    } catch (err) {
+      // ✅ 시스템 공유시트 없이 인스타 앱만 띄우기
+      await Share.shareSingle({
+        social: Share.Social.INSTAGRAM,
+        url: uri,                 // file://...
+        type: 'image/jpeg',
+        filename: 'share.jpg',
+        failOnCancel: false,
+      });
+
+      // 파일은 바로 지우지 말고 딜레이(인스타가 읽을 시간)
+      setTimeout(() => { cleanup().catch(() => {}); }, 15000);
+
+      sendToWeb?.('SHARE_RESULT', { success: true, platform: 'INSTAGRAM_STORIES', method: 'single' });
+    } catch (e) {
+      sendToWeb?.('SHARE_RESULT', {
+        success: false, platform: 'INSTAGRAM_STORIES',
+        error_code: 'share_failed', message: String(e?.message || e),
+      });
+    }
+  } catch (err) {
     sendToWeb?.('SHARE_RESULT', {
-      success: false, platform: 'INSTAGRAM',
+      success: false, platform: 'INSTAGRAM_STORIES',
       error_code: 'share_failed', message: String(err?.message || err),
     });
   }
@@ -396,76 +483,6 @@ async function shareToInstagramFeed(payloadOrData = {}, sendToWeb) {
 
 
 
-// 전제: buildFinalText, ensureLocalPng, Clipboard, Share 가 import되어 있음
-
-async function shareToInstagramStories(payloadOrData = {}, sendToWeb) {
-  const TAG = '[IG_STORY]';
-  try {
-    const d = payloadOrData?.data ?? payloadOrData ?? {};
-    const src = d.imageUrl || d.url || d.image;
-    if (!src) throw new Error('no_image_source');
-
-    // 1) 스토리는 텍스트 파라미터가 무시되므로 캡션은 클립보드로만
-    try {
-      const cap = buildFinalText({
-        caption: d.caption,
-        hashtags: d.hashtags,
-        couponEnabled: false,
-        link: undefined,
-      });
-      if (cap) Clipboard.setString(cap);
-    } catch { }
-
-    // 2) PNG 확보 (스토리는 PNG가 안정적)
-    const { uri: pngUri, cleanup } = await ensureLocalPng(src);
-
-    // 3) backgroundImage → stickerImage → 시스템 공유 폴백
-    try {
-      await Share.shareSingle({
-        social: Share.Social.INSTAGRAM_STORIES,
-        backgroundImage: pngUri,
-        attributionURL: d.link,           // 선택(무시될 수 있음)
-        backgroundTopColor: '#000000',
-        backgroundBottomColor: '#000000',
-        type: 'image/png',
-        filename: 'share.png',
-        failOnCancel: false,
-      });
-      sendToWeb?.('SHARE_RESULT', { success: true, platform: 'INSTAGRAM_STORIES', method: 'backgroundImage' });
-    } catch (e1) {
-      try {
-        await Share.shareSingle({
-          social: Share.Social.INSTAGRAM_STORIES,
-          stickerImage: pngUri,
-          attributionURL: d.link,
-          backgroundTopColor: '#000000',
-          backgroundBottomColor: '#000000',
-          type: 'image/png',
-          filename: 'share.png',
-          failOnCancel: false,
-        });
-        sendToWeb?.('SHARE_RESULT', { success: true, platform: 'INSTAGRAM_STORIES', method: 'stickerImage' });
-      } catch (e2) {
-        await Share.open({
-          url: pngUri,
-          type: 'image/png',
-          filename: 'share.png',
-          failOnCancel: false,
-        });
-        sendToWeb?.('SHARE_RESULT', { success: true, platform: 'SYSTEM', method: 'fallback' });
-      }
-    } finally {
-      await cleanup();
-    }
-  } catch (err) {
-    sendToWeb?.('SHARE_RESULT', {
-      success: false,
-      platform: 'INSTAGRAM_STORIES',
-      error_code: 'share_failed',
-      message: String(err?.message || err),
-    });
-  }
-}
 
 
 
@@ -484,7 +501,202 @@ const App = () => {
   const lastPushTokenRef = useRef('');
   const lastNavStateRef = useRef({});
 
+
+  const [mediaSheetVisible, setMediaSheetVisible] = useState(false);
+  const preferRef = useRef(null); // 'camera' 선호 여부 보관
+
+  const injectJS = (js) => {
+    try { webViewRef.current?.injectJavaScript(String(js) + '\ntrue;'); } catch {}
+  };
+  const emitWebCancel = () => {
+    injectJS(`try { if (window.onCameraCancelled) window.onCameraCancelled(); } catch(e) {}`);
+  };
+  const emitWebImage = (dataUri) => {
+    // 웹의 receiveCameraImage(dataUri)를 호출
+    injectJS(`try { if (window.receiveCameraImage) window.receiveCameraImage(${JSON.stringify(dataUri)}); } catch(e) {}`);
+  };
+
+
+  // ─────────── 외부앱/새창 처리 헬퍼 ───────────
+const isHttpLike = (u = '') => /^https?:\/\//i.test(u);
+const isExternalScheme = (u = '') =>
+  /^(?:intent|market|passauth|pass|ktauthexternalcall|tauthlink|upluscorporation|kakaolink|naversearchapp|tel|mailto|sms):/i.test(u);
+
+// Android intent:// URI 파서
+// 예: intent://requestktauth?appToken=...#Intent;scheme=ktauthexternalcall;package=com.kt.ktauth;end
+function parseAndroidIntentUri(url = '') {
+  if (!/^intent:\/\//i.test(url)) return null;
+  try {
+    const withoutPrefix = url.replace(/^intent:\/\//i, '');
+    const parts = withoutPrefix.split('#Intent');
+    const pathQueryRaw = parts[0] || '';
+    const intentPart = parts[1] || '';
+
+    const getVal = (key) => {
+      const m = new RegExp(`${key}=([^;]+)`, 'i').exec(intentPart);
+      return m ? m[1] : null;
+    };
+
+    const scheme = getVal('scheme');
+    const pkg = getVal('package');
+
+    // 앞의 슬래시를 모두 제거 (/* 패턴 없이 안전한 정규식 사용)
+    const pathQuery = String(pathQueryRaw).replace(/^\/+/, '');
+
+    const asCustomUrl = scheme ? `${scheme}://${pathQuery}` : null;
+    return { scheme, pkg, pathQuery, asCustomUrl };
+  } catch (e) {
+    return null;
+  }
+}
+
+async function openExternalUrl(url) {
+  try {
+    // intent:// 처리
+    if (/^intent:\/\//i.test(url)) {
+      const parsed = parseAndroidIntentUri(url);
+        console.log('[PASS] intent→parsed', parsed);
+      // 1) 커스텀 스킴 URL로 먼저 시도 (예: ktauthexternalcall://requestktauth?...)
+      if (parsed?.asCustomUrl) {
+        try {
+          const can = await Linking.canOpenURL(parsed.asCustomUrl);
+          console.log('[PASS][canOpenURL]', can, parsed.asCustomUrl);
+          if (can) {
+            await Linking.openURL(parsed.asCustomUrl);
+            return true;
+          }
+        } catch {}
+      }
+
+      // 2) 브라우저 폴백
+      const fbMatch = /S\.browser_fallback_url=([^;]+)/i.exec(url);
+      if (fbMatch && fbMatch[1]) {
+        const fb = decodeURIComponent(fbMatch[1]);
+        try {
+          await Linking.openURL(fb);
+          return true;
+        } catch {}
+      }
+
+      // 3) 패키지 기반 스토어 폴백
+      const pkg =
+        parsed?.pkg || (/(?:;|^)package=([^;]+)/i.exec(url)?.[1] ?? null);
+      if (pkg) {
+        try {
+          await Linking.openURL(`market://details?id=${pkg}`);
+          return true;
+        } catch {}
+        try {
+          await Linking.openURL(
+            `https://play.google.com/store/apps/details?id=${pkg}`
+          );
+          return true;
+        } catch {}
+      }
+      return false;
+    }
+
+    // market:// 처리
+    if (/^market:\/\//i.test(url)) {
+      try {
+        await Linking.openURL(url);
+        return true;
+      } catch {}
+      const id = (url.match(/id=([^&]+)/i) || [])[1];
+      if (id) {
+        try {
+          await Linking.openURL(
+            `https://play.google.com/store/apps/details?id=${id}`
+          );
+          return true;
+        } catch {}
+      }
+      return false;
+    }
+
+    // 일반 커스텀 스킴 처리 (passauth://, ktauthexternalcall:// 등)
+    const can = await Linking.canOpenURL(url);
+    if (can) {
+      await Linking.openURL(url);
+      return true;
+    }
+    return false;
+  } catch (e) {
+    console.log('[WebView][openExternalUrl][ERR]', url, e?.message || e);
+    return false;
+  }
+}
+
+function shouldAllowWebRequest(req) {
+  const url = req?.url || '';
+  console.log('[WV][shouldStart]', url); // ← 반드시 찍히는지 확인
+  if (isHttpLike(url)) return true;
+
+  if (isExternalScheme(url)) {
+    openExternalUrl(url).then((ok) => {
+      if (!ok) {
+        try {
+          Alert.alert(
+            '앱 열기 실패',
+            '필요한 인증 앱이 없거나 열 수 없습니다. 실제 단말에서 다시 시도해 주세요.'
+          );
+        } catch {}
+      }
+    });
+    // WebView는 로드 금지
+    return false;
+  }
+
+  // 알 수 없는 스킴도 보수적으로 외부 시도
+  openExternalUrl(url);
+  return false;
+}
+
+
+  async function pickFromLibrary() {
+    try {
+      const res = await launchImageLibrary({
+        mediaType: 'photo',
+        includeBase64: true,
+        selectionLimit: 1,
+      });
+      if (res.didCancel) { emitWebCancel(); return; }
+      const a = res?.assets?.[0];
+      if (!a?.base64) { emitWebCancel(); return; }
+      const mime = a.type || 'image/jpeg';
+      emitWebImage(`data:${mime};base64,${a.base64}`);
+    } finally {
+      setMediaSheetVisible(false);
+    }
+  }
+  async function takePhoto() {
+    try {
+      const res = await launchCamera({
+        mediaType: 'photo',
+        includeBase64: true,
+        saveToPhotos: false,
+      });
+      if (res.didCancel) { emitWebCancel(); return; }
+      const a = res?.assets?.[0];
+      if (!a?.base64) { emitWebCancel(); return; }
+      const mime = a.type || 'image/jpeg';
+      emitWebImage(`data:${mime};base64,${a.base64}`);
+    } finally {
+      setMediaSheetVisible(false);
+    }
+  }
+
   const [installId, setInstallId] = useState(null);
+  const [webTextZoom, setWebTextZoom] = useState(100);
+
+  // 시스템 폰트 배율(접근성 글자 크기) → 100 단위로 환산
+  const getSystemTextZoom = useCallback(() => {
+    try {
+      return Math.round(PixelRatio.getFontScale() * 100);
+    } catch {
+      return 100;
+    }
+  }, []);
 
   // ─────────── IAP 진행 상태(락) ───────────
   const iapBusyRef = useRef(false);
@@ -643,13 +855,17 @@ const App = () => {
           if (productId === ANDROID_INAPP_BASIC) {
             try {
               // v14 표준: 구매 객체 p 넘기고 consumable=true
-              await RNIAP.finishTransaction(p, true);
-              DBG.log('finishTransaction.done (consumable)', productId);
+              // await RNIAP.finishTransaction(p, true);
 
+              const purchaseToken = p.purchaseToken;
               handledTokensRef.current.add(purchaseToken);
               sendToWeb('PURCHASE_RESULT', {
-                success: true, platform: Platform.OS,
-                one_time: true, product_id: productId, transaction_id: id,
+                success: true,
+                platform: Platform.OS,
+                one_time: true,
+                product_id: productId,
+                transaction_id: id,
+                purchase_token: purchaseToken, // ★ 이거 추가
               });
               endIap();
               return;
@@ -660,30 +876,30 @@ const App = () => {
               // ====== 우회 시나리오 ======
               // 일부 단말/샌드박스에서 'not suitable' / 'already'가 뜨면
               // 비소모(false)로 마무리 시도 + ack 시도 후 성공으로 처리.
-              if (/not suitable/i.test(msg) || /already/i.test(msg)) {
-                try {
-                  try { await RNIAP.finishTransaction(p, false); } catch { }
-                  try { await RNIAP.acknowledgePurchaseAndroid?.(purchaseToken); } catch { }
-                  DBG.log('finishTransaction.fallback.done', productId);
-
-                  handledTokensRef.current.add(purchaseToken);
-                  sendToWeb('PURCHASE_RESULT', {
-                    success: true, platform: Platform.OS,
-                    one_time: true, product_id: productId, transaction_id: id,
-                  });
-                  endIap();
-                  return;
-                } catch (fe2) {
-                  DBG.log('finishTransaction.fallback.ERROR', fe2?.code, String(fe2?.message || fe2));
-                  sendToWeb('PURCHASE_RESULT', {
-                    success: false, platform: Platform.OS,
-                    error_code: fe2?.code || 'finish_failed',
-                    message: String(fe2?.message || fe2),
-                  });
-                  endIap();
-                  return;
-                }
-              }
+//              if (/not suitable/i.test(msg) || /already/i.test(msg)) {
+//                try {
+//                  try { await RNIAP.finishTransaction(p, false); } catch { }
+//                  try { await RNIAP.acknowledgePurchaseAndroid?.(purchaseToken); } catch { }
+//                  DBG.log('finishTransaction.fallback.done', productId);
+//
+//                  handledTokensRef.current.add(purchaseToken);
+//                  sendToWeb('PURCHASE_RESULT', {
+//                    success: true, platform: Platform.OS,
+//                    one_time: true, product_id: productId, transaction_id: id,
+//                  });
+//                  endIap();
+//                  return;
+//                } catch (fe2) {
+//                  DBG.log('finishTransaction.fallback.ERROR', fe2?.code, String(fe2?.message || fe2));
+//                  sendToWeb('PURCHASE_RESULT', {
+//                    success: false, platform: Platform.OS,
+//                    error_code: fe2?.code || 'finish_failed',
+//                    message: String(fe2?.message || fe2),
+//                  });
+//                  endIap();
+//                  return;
+//                }
+//              }
 
               // 일반 실패
               sendToWeb('PURCHASE_RESULT', {
@@ -816,6 +1032,7 @@ const App = () => {
     try {
       if (!sku) throw new Error('invalid_inapp_sku');
       DBG.log('buyAndroidOneTime.begin', { sku });
+
 
       // ✅ v14 안드로이드: { skus: [...] } 한 번만 호출
       const params = { skus: [sku] };
@@ -988,6 +1205,31 @@ const App = () => {
         case 'WEB_ERROR': await handleWebError(data.payload); break;
         case 'CHECK_PERMISSION': await handleCheckPermission(); break;
         case 'REQUEST_PERMISSION': await handleRequestPermission(); break;
+
+        case 'OPEN_MEDIA_PICKER': {
+          // 바텀시트 열고, prefer가 camera면 바로 카메라 띄워도 됨(원하면)
+          const prefer = data?.payload?.prefer || null;
+          preferRef.current = prefer;
+          setMediaSheetVisible(true);
+          // 만약 prefer === 'camera'면 바로 takePhoto() 호출하도록 바꾸고 싶으면:
+          // if (prefer === 'camera') { takePhoto(); } else { setMediaSheetVisible(true); }
+          break;
+        }
+
+        // 글자 크기대로 반영
+        case 'TEXT_ZOOM': {
+          if (Platform.OS === 'android') {
+            const mode = data?.mode;        // "system" | "fixed" | number
+            if (mode === 'system') {
+              setWebTextZoom(getSystemTextZoom());   // 접근성 글자크기 반영
+            } else if (mode === 'fixed' || mode == null) {
+              setWebTextZoom(100);                   // 고정
+            } else if (typeof mode === 'number') {
+              setWebTextZoom(Math.round(mode));      // 임의 배율(예: 110)
+            }
+          }
+          break;
+        }
 
         // ✅ 구독 결제
         case 'START_SUBSCRIPTION': {
@@ -1169,7 +1411,87 @@ const App = () => {
         <WebView
           ref={webViewRef}
           source={{ uri: 'http://www.wizmarket.ai/ads/start' }}
-          onMessage={onMessageFromWeb}
+
+          originWhitelist={['*']}              // 느슨하게 허용
+            onShouldStartLoadWithRequest={shouldAllowWebRequest}
+            onNavigationStateChange={(nav) => {  // same-window 백업 가로채기
+              const url = nav?.url || '';
+              if (!/^https?:\/\//i.test(url)) {
+                openExternalUrl(url);
+                try { webViewRef.current?.stopLoading(); } catch {}
+              }
+            }}
+            setSupportMultipleWindows={true}
+            javaScriptCanOpenWindowsAutomatically={true}
+            onCreateWindow={(e) => {
+              const url = e?.nativeEvent?.targetUrl || '';
+              if (!/^https?:\/\//i.test(url)) { openExternalUrl(url); return false; }
+              return false;
+            }}
+
+            // ★ 여기 추가: intent:// 던지기 전에 잡아서 RN로 postMessage
+            injectedJavaScriptBeforeContentLoaded={`
+              (function() {
+                var ORIG_OPEN = window.open;
+                var ORIG_ASSIGN = window.location.assign;
+                var ORIG_SET = Object.getOwnPropertyDescriptor(Location.prototype, 'href')?.set;
+
+                function sendToRN(u){
+                  try { window.ReactNativeWebView.postMessage(JSON.stringify({ type:'INTENT_URL', url:String(u||'') })); } catch(e){}
+                }
+                function isIntent(u){ return /^intent:\\/\\//i.test(String(u||'')); }
+
+                // a[href] 클릭 가로채기
+                document.addEventListener('click', function(e){
+                  var a = e.target.closest && e.target.closest('a[href]');
+                  if (a) {
+                    var href = a.getAttribute('href') || '';
+                    if (isIntent(href)) { e.preventDefault(); e.stopPropagation(); sendToRN(href); }
+                  }
+                }, true);
+
+                // window.open 가로채기
+                window.open = function(u, n, f){
+                  if (isIntent(u)) { sendToRN(u); return null; }
+                  return ORIG_OPEN ? ORIG_OPEN.apply(window, arguments) : null;
+                };
+
+                // location.assign 가로채기
+                window.location.assign = function(u){
+                  if (isIntent(u)) { sendToRN(u); return; }
+                  return ORIG_ASSIGN.apply(window.location, arguments);
+                };
+
+                // location.href = 'intent://...' 가로채기
+                try {
+                  if (ORIG_SET) {
+                    Object.defineProperty(window.location, 'href', {
+                      configurable: true,
+                      get: function(){ return document.location.href; },
+                      set: function(u){
+                        if (isIntent(u)) { sendToRN(u); return; }
+                        return ORIG_SET.call(window.location, u);
+                      }
+                    });
+                  }
+                } catch(e){}
+              })();
+              true;
+            `}
+
+            // RN에서 수신 → openExternalUrl 실행
+            onMessage={(e) => {
+              try {
+                const m = JSON.parse(e.nativeEvent.data);
+                if (m?.type === 'INTENT_URL' && m?.url) {
+                  openExternalUrl(m.url);
+                  return;
+                }
+              } catch {}
+              onMessageFromWeb(e); // 기존 핸들러 유지
+            }}
+
+          // onMessage={onMessageFromWeb}
           onLoadStart={onWebViewLoadStart}
           onLoadProgress={({ nativeEvent }) => { if (nativeEvent.progress >= 0.9) hideSplashRespectingMin(); }}
           onLoadEnd={() => { hideSplashRespectingMin(); }}
@@ -1179,12 +1501,72 @@ const App = () => {
           overScrollMode="never"
           containerStyle={{ backgroundColor: 'transparent', flex: 1 }}
           style={{ backgroundColor: 'transparent', flex: 1 }}
+          textZoom={Platform.OS === 'android' ? webTextZoom : undefined}
+          injectedJavaScript={`
+            (function() {
+              if (!window.Android) window.Android = {};
+              // 갤러리 열기: RN에 메시지로 전달
+              window.Android.openGallery = function() {
+                try {
+                  window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'OPEN_MEDIA_PICKER' }));
+                } catch (e) {}
+              };
+              // (옵션) 카메라 열기 훅도 만들어 둘 수 있음
+              window.Android.openCamera = function() {
+                try {
+                  window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'OPEN_MEDIA_PICKER', payload: { prefer: 'camera' } }));
+                } catch (e) {}
+              };
+            })();
+            true;
+          `}
         />
         {splashVisible && (
           <SafeAreaInsetOverlay opacity={splashFade}>
             <SplashScreenRN />
           </SafeAreaInsetOverlay>
         )}
+
+        {/* 미디어 선택 바텀시트 */}
+        <Modal
+          visible={mediaSheetVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => { setMediaSheetVisible(false); emitWebCancel(); }}
+        >
+          {/* 바깥 반투명 영역: 탭하면 취소 */}
+          <TouchableWithoutFeedback onPress={() => { setMediaSheetVisible(false); emitWebCancel(); }}>
+            <View style={{ flex:1, backgroundColor:'rgba(0,0,0,0.35)' }} />
+          </TouchableWithoutFeedback>
+
+          {/* 시트 */}
+          <View style={{
+            position:'absolute', left:0, right:0, bottom:0,
+            backgroundColor:'#fff', borderTopLeftRadius:16, borderTopRightRadius:16,
+            paddingBottom: 16, paddingTop: 8
+          }}>
+            <View style={{ alignItems:'center', paddingVertical:8 }}>
+              <View style={{ width:40, height:4, backgroundColor:'#ccc', borderRadius:2 }} />
+            </View>
+            <Pressable
+              onPress={takePhoto}
+              style={{ paddingVertical:14, alignItems:'center' }}
+            >
+              <Text style={{ fontSize:16, fontWeight:'600' }}>카메라로 촬영</Text>
+            </Pressable>
+            <View style={{ height:1, backgroundColor:'#eee' }} />
+            <Pressable
+              onPress={pickFromLibrary}
+              style={{ paddingVertical:14, alignItems:'center' }}
+            >
+              <Text style={{ fontSize:16, fontWeight:'600' }}>갤러리에서 선택</Text>
+            </Pressable>
+            {/* 취소 버튼은 안 넣고, 바깥 탭으로만 닫히게 요구하셨으니 이대로 */}
+          </View>
+        </Modal>
+
+
+
       </SafeAreaView>
     </SafeAreaProvider>
   );

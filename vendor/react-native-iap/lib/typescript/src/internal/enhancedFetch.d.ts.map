@@ -1,0 +1,1 @@
+{"version":3,"file":"enhancedFetch.d.ts","sourceRoot":"","sources":["../../../../src/internal/enhancedFetch.ts"],"names":[],"mappings":"AAAA,UAAU,sBAAuB,SAAQ,IAAI,CAAC,WAAW,EAAE,MAAM,CAAC;IAChE,IAAI,EAAE,MAAM,CAAC,MAAM,EAAE,GAAG,CAAC,CAAC;CAC3B;AAED,eAAO,MAAM,aAAa,iBACnB,MAAM,SACJ,sBAAsB,eAkB9B,CAAC"}

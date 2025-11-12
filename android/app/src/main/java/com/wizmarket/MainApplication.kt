@@ -11,8 +11,10 @@ import com.facebook.react.ReactPackage
 import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
 import com.facebook.react.defaults.DefaultReactNativeHost
 import com.kakao.sdk.common.KakaoSdk
-import com.reactnativecommunity.cameraroll.CameraRollPackage
+// import com.reactnativecommunity.cameraroll.CameraRollPackage
 import com.wizmarket.kakao.KakaoLoginPackage
+import com.wizmarket.share.KakaoSharePackage
+import com.wizmarket.share.BandSharePackage
 
 class MainApplication : Application(), ReactApplication {
 
@@ -24,9 +26,10 @@ class MainApplication : Application(), ReactApplication {
 
               // ✅ 수동 추가
               packages.add(KakaoLoginPackage())
-              packages.add(CameraRollPackage())
-
-              return packages
+              // packages.add(CameraRollPackage())
+                packages.add(KakaoSharePackage())
+                packages.add(BandSharePackage())
+                return packages
             }
 
             override fun getJSMainModuleName(): String = "index"

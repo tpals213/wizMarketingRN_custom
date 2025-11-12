@@ -1,0 +1,71 @@
+iap.zip 파일 RN 프로젝트 루트 밑에 복사
+
+# 루트 경로 기준
+# 기존 iap 제거
+npm uninstall react-native-iap
+
+# 대상 폴더 비우기
+Remove-Item -Recurse -Force .\vendor\react-native-iap-custom -ErrorAction SilentlyContinue
+New-Item -ItemType Directory .\vendor | Out-Null
+
+# zip → vendor/react-native-iap-custom 아래로 풀기
+tar -xf .\react-native-iap.zip -C .\vendor
+
+
+# 잘 풀렸는지 확인
+Get-ChildItem .\vendor -Depth 2
+package.json 이 보여야함
+
+# package.json 열어서 scripts 블럭 삭제
+
+# 설치
+npm i .\vendor\react-native-iap --legacy-peer-deps
+
+# 설치 확인
+npm ls react-native-iap
+
+wizmarket@0.0.1 C:\workspace\wizmarketingRN
+`-- react-native-iap@13.0.4 -> .\vendor\react-native-iap
+
+이렇게 나와야함
+
+
+# 루트 폴더의 package.json scripts 블럭에 추가
+# 아까 scripts 지운 .json 파일 아님!!!
+    "android:play": "cd android && gradlew installPlayDebug",
+    "assemble:play": "cd android && gradlew assemblePlayDebug",
+    "install:play": "cd android && gradlew installPlayDebug"
+
+
+# 터미널 1 npm run start 로 메트로 키기
+# 가상기기 띄운 채로 터미널 2에서 npm run android:play
+# 이럼 설치 완료
+# 터미널2에서 
+adb shell monkey -p com.wizmarket -c android.intent.category.LAUNCHER 1
+# playstore 를 통한 앱 설치가 아니기 때문에 결제 테스트는 불가
+# 그 외 테스트도 한번 해봐야함
+# 앱 올려야함
+
+# RN/android/app/my-release-key.jks 있는 지 확인
+# RN/andorid/gradle.properties 열어서 MYAPP_UPLOAD_STORE_FILE 경로 확인
+# 본인 경로 아닐 시 MYAPP_UPLOAD_STORE_FILE=my-release-key.jks 로 수정
+
+
+# 에뮬레이터 실행 방법
+cd C:\workspace\wizmarketingRN\android
+.\gradlew clean
+.\gradlew :app:installPlayDebug -PreactNativeDevServerPort=8081
+
+
+
+# 플레이스토어 업로드용 .aab 파일 만들기
+# RN/android/app/src/build.gradle 의 버전 코드 높이기
+# versionCode 40    versionName "40.0"
+
+
+cd C:\workspace\wizmarketingRN_Custom\android
+.\gradlew clean
+.\gradlew bundlePlayRelease
+
+# 장소
+# app/build/outputs/bundle/playRelease/~~.aab

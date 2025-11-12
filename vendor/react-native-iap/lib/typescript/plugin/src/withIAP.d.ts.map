@@ -1,0 +1,1 @@
+{"version":3,"file":"withIAP.d.ts","sourceRoot":"","sources":["../../../../plugin/src/withIAP.ts"],"names":[],"mappings":"AACA,OAAO,EAAC,YAAY,EAAsB,MAAM,qBAAqB,CAAC;AAItE,KAAK,eAAe,GAAG,iBAAiB,GAAG,MAAM,GAAG,YAAY,CAAC;AAuCjE,eAAO,MAAM,oBAAoB,gBAClB,MAAM,mBACF,eAAe,WAwBjC,CAAC;AAkBF,UAAU,KAAK;IACb,eAAe,CAAC,EAAE,eAAe,CAAC;CACnC;;AA0BD,wBAAmE"}

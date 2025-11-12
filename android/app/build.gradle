@@ -18,18 +18,18 @@ android {
     applicationId "com.wizmarket"
     minSdkVersion rootProject.ext.minSdkVersion
     targetSdkVersion rootProject.ext.targetSdkVersion
-    versionCode 37
-    versionName "37.0"
+    versionCode 63
+    versionName "63.0"
 
-    // (선택) NDK 이슈 회피
-    ndk { abiFilters "arm64-v8a" }   // 32비트 네이티브 빌드/클린 통째로 패스
+    // ✅ 기본값: ABI 필터 지정하지 않음(디버그는 에뮬레이터용 x86_64까지 자동 포함)
+    // ndk { abiFilters "arm64-v8a" } // ❌ 개발 중 주석
 
     // Kakao
     manifestPlaceholders = [ KAKAO_NATIVE_APP_KEY: "ef66c5836528d39100550fd6ca87f7dc" ]
     resValue "string", "kakao_native_app_key", "ef66c5836528d39100550fd6ca87f7dc"
     buildConfigField "String", "KAKAO_NATIVE_APP_KEY", "\"ef66c5836528d39100550fd6ca87f7dc\""
 
-    // ✅ IAP store dimension 기본값을 play로
+    // IAP store dimension 기본값을 play로
     missingDimensionStrategy "store", "play"
   }
 
@@ -51,7 +51,11 @@ android {
   buildTypes {
     debug {
       signingConfig signingConfigs.debug
-      // (선택) Kakao 값 재주입
+
+      // ✅ 에뮬레이터/실기기 전부 케어: 디버그에만 모든 ABI 포함
+      ndk { abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64' }
+
+      // Kakao 값 재주입
       manifestPlaceholders.KAKAO_NATIVE_APP_KEY = "ef66c5836528d39100550fd6ca87f7dc"
       resValue "string", "kakao_native_app_key", "ef66c5836528d39100550fd6ca87f7dc"
       buildConfigField "String","KAKAO_NATIVE_APP_KEY","\"ef66c5836528d39100550fd6ca87f7dc\""
@@ -60,26 +64,30 @@ android {
       signingConfig signingConfigs.release
       minifyEnabled enableProguardInReleaseBuilds
       proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+
+      // ✅ 릴리스 슬림(스토어 용량↓): arm64만
+      ndk { abiFilters 'arm64-v8a' }
+
       manifestPlaceholders.KAKAO_NATIVE_APP_KEY = "ef66c5836528d39100550fd6ca87f7dc"
       resValue "string", "kakao_native_app_key", "ef66c5836528d39100550fd6ca87f7dc"
       buildConfigField "String","KAKAO_NATIVE_APP_KEY","\"ef66c5836528d39100550fd6ca87f7dc\""
     }
   }
 
-  // ✅ IAP가 요구하는 store flavor
+  // IAP가 요구하는 store flavor
   flavorDimensions "store"
   productFlavors {
     play { dimension "store" }
     // amazon { dimension "store" }
   }
 
-  // (선택) amazon 변형 전체 무시(빌드 간소화)
+  // amazon 변형 전체 무시(빌드 간소화)
   variantFilter { variant ->
     def names = variant.flavors*.name
     if (names.contains("amazon")) setIgnore(true)
   }
 
-  // ✅ JDK 17 정렬
+  // JDK 17 정렬
   compileOptions {
     sourceCompatibility JavaVersion.VERSION_17
     targetCompatibility JavaVersion.VERSION_17
@@ -97,13 +105,13 @@ dependencies {
   implementation(platform("com.google.firebase:firebase-bom:33.3.0"))
   implementation "com.kakao.sdk:v2-user:2.20.6"
 
-  // ⚠️ IAP를 쓰는 중이면 billing-ktx를 수동으로 추가하지 마세요(중복 충돌)
+  // ⚠️ IAP 사용 중이면 billing-ktx 수동 추가 금지(중복 충돌 위험)
   // implementation "com.android.billingclient:billing-ktx:6.2.1"
 }
 
 apply plugin: "com.google.gms.google-services"
 
-// ✅ Kotlin 컴파일러 옵션(JVM 17)
+// Kotlin 컴파일러 옵션(JVM 17)
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
   kotlinOptions {
     jvmTarget = "17"

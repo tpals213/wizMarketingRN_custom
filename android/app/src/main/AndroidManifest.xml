@@ -6,10 +6,63 @@
     <queries>
         <package android:name="com.kakao.talk" />
         <package android:name="com.instagram.android" />
+        <package android:name="com.nhn.android.band"/>
         <intent>
             <action android:name="android.intent.action.SEND" />
             <data android:mimeType="image/*" />
         </intent>
+        <intent>
+            <action android:name="com.instagram.share.ADD_TO_STORY" />
+            <data android:mimeType="image/*" />
+        </intent>
+
+        <!-- ✅ PASS 호출/폴백을 위한 추가 쿼리 -->
+        <!-- intent:// URI -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="intent" />
+        </intent>
+
+        <!-- passauth:// 커스텀 스킴 -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="passauth" />
+        </intent>
+
+        <!-- market:// (플레이스토어 폴백) -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="market" />
+        </intent>
+
+        <!-- 구글 플레이 앱 -->
+        <package android:name="com.android.vending" />
+
+        <!-- (권장) 통신사/단말별 PASS 패키지들: KCB 가이드 명시분을 추가 -->
+        <package android:name="com.sktelecom.tauth" />
+        <package android:name="com.lguplus.smartotp" />
+        <package android:name="kr.co.kcp.pass" />
+
+        <!-- KT PASS -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="ktauthexternalcall" />
+        </intent>
+        <package android:name="com.kt.ktauth" />
+
+        <!-- SKT PASS (의미상 중복이어도 안전) -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="tauthlink" />
+        </intent>
+
+        <!-- LG U+ PASS -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="upluscorporation" />
+        </intent>
+
+
     </queries>
 
     <uses-permission android:name="android.permission.INTERNET" />
