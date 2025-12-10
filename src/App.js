@@ -6,7 +6,8 @@ import '@react-native-firebase/app';
 import {
   BackHandler, StyleSheet, Platform, Alert,
   Linking, LogBox, Animated, Easing, StatusBar,
-  PermissionsAndroid, PixelRatio
+  PermissionsAndroid, PixelRatio,
+  AppState
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import messaging from '@react-native-firebase/messaging';
@@ -27,6 +28,7 @@ import ImageResizer from 'react-native-image-resizer';
 import { NativeModules } from 'react-native';
 const { KakaoLoginModule } = NativeModules;
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import DeviceInfo from 'react-native-device-info';
 
 // App.js 상단 import들 사이에 추가
 import { Modal, View, Text, Pressable, TouchableWithoutFeedback } from 'react-native';
@@ -40,6 +42,8 @@ const TAG = '[WizApp]';
 const NAVER_AUTH_URL = 'https://nid.naver.com/oauth2.0/authorize';
 const NAVER_CLIENT_ID = 'YSd2iMy0gj8Da9MZ4Unf';
 
+
+
 // ─────────── IAP SKU ───────────
 // 구독(Subs)
 const ANDROID_SKUS = [
@@ -49,7 +53,8 @@ const ANDROID_SKUS = [
   'wm_concierge_m',
 ];
 // 단건(Consumable) — 외주 요청: 베이직을 인앱 단건으로 운영
-const ANDROID_INAPP_BASIC = 'wm_basic_n';
+// const ANDROID_INAPP_BASIC = 'wm_basic_n';
+const ANDROID_INAPP_BASIC = ['wm_basic_n', 'wm_standard_n', 'wm_premium_n'];
 
 let purchaseUpdateSub = null;
 let purchaseErrorSub = null;
@@ -148,6 +153,11 @@ const SOCIAL_MAP = {
   SYSTEM: 'SYSTEM',
 };
 
+
+// 인스타 공유 흐름 제어
+const pendingShareRef = { current: null };      // 인스타 공유 진행 상태
+const lastSendToWebRef = { current: null };     // 마지막 sendToWeb 함수
+
 // 구조화 로그 유틸
 const logJSON = (tag, obj) => console.log(`${tag} ${safeStringify(obj)}`);
 const replacer = (_k, v) => (v instanceof Error ? { name: v.name, message: v.message, stack: v.stack } : (typeof v === 'bigint' ? String(v) : v));
@@ -169,8 +179,9 @@ function extToMime(e) { return e === 'png' ? 'image/png' : e === 'webp' ? 'image
 async function ensureMediaPermissions() {
   if (Platform.OS !== 'android') return;
   if (Platform.Version >= 33) {
-    const res = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES);
-    if (res !== PermissionsAndroid.RESULTS.GRANTED) throw new Error('READ_MEDIA_IMAGES denied');
+    // const res = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES);
+    // if (res !== PermissionsAndroid.RESULTS.GRANTED) throw new Error('READ_MEDIA_IMAGES denied');
+    return
   } else {
     const res = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE);
     if (res !== PermissionsAndroid.RESULTS.GRANTED) throw new Error('WRITE_EXTERNAL_STORAGE denied');
@@ -187,6 +198,97 @@ async function downloadAndSaveToGallery(url, filename = 'image.jpg') {
   await CameraRoll.save(dest, { type: 'photo' });
   RNFS.unlink(dest).catch(() => { });
 }
+
+
+// 파일 다운로드 처리
+// 일반 파일 저장 권한
+async function ensureFilePermissions() {
+  if (Platform.OS !== 'android') return;
+  if (Platform.Version >= 33) {
+    // Android 13+ 는 SAF/DownloadManager가 더 정석인데
+    // 일단 예시는 권한 없이 DownloadDirectoryPath에 시도 (필요하면 추후 보완)
+    return;
+  } else {
+    const res = await PermissionsAndroid.request(
+      PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
+    );
+    if (res !== PermissionsAndroid.RESULTS.GRANTED) {
+      throw new Error('WRITE_EXTERNAL_STORAGE denied');
+    }
+  }
+}
+
+// ✅ destDir: /storage/emulated/0/Download
+// ✅ safeName: "새 텍스트 문서.txt"
+async function getUniqueDownloadPath(destDir, safeName) {
+  // 확장자 분리
+  const dotIndex = safeName.lastIndexOf('.');
+  const hasExt = dotIndex > 0;
+  const base = hasExt ? safeName.slice(0, dotIndex) : safeName; // "새 텍스트 문서"
+  const ext = hasExt ? safeName.slice(dotIndex) : "";           // ".txt" 또는 ""
+
+  // base가 이미 "새 텍스트 문서(3)" 형태일 수도 있어서 처리
+  const m = base.match(/^(.*)\((\d+)\)$/);   // "이름(3)" 패턴
+  let baseName = base;
+  let n = 1;
+
+  if (m) {
+    baseName = m[1];              // "새 텍스트 문서"
+    n = parseInt(m[2], 10);       // 3
+  }
+
+  // 1) 원본 이름 먼저 시도: "새 텍스트 문서.txt"
+  let candidate = `${destDir}/${baseName}${ext}`;
+  if (!(await RNFS.exists(candidate))) {
+    return candidate; // 아직 없으면 이걸로 저장
+  }
+
+  // 2) 이미 있으면 "(2)"부터 증가: "새 텍스트 문서(2).txt", "새 텍스트 문서(3).txt" …
+  while (true) {
+    n += 1; // 처음이면 2가 됨
+    candidate = `${destDir}/${baseName}(${n})${ext}`; // ← 괄호 안 숫자만 증가
+
+    const exists = await RNFS.exists(candidate);
+    if (!exists) {
+      return candidate;
+    }
+  }
+}
+
+
+async function downloadFileToDevice(url, filename = 'file.bin') {
+  if (!url) throw new Error('no_url');
+
+  console.log(2);
+  await ensureFilePermissions();
+
+  const safeName =
+    filename.replace(/[\\/:*?"<>|]/g, '_') || 'file.bin';
+
+  const destDir =
+    Platform.OS === 'android'
+      ? RNFS.DownloadDirectoryPath           // /storage/emulated/0/Download
+      : RNFS.DocumentDirectoryPath;         // iOS app document
+
+  // ✅ 윈도우 스타일 중복 처리된 최종 경로 얻기
+  const destPath = await getUniqueDownloadPath(destDir, safeName);
+
+  const { statusCode } = await RNFS.downloadFile({
+    fromUrl: url,
+    toFile: destPath,
+  }).promise;
+
+  if (!(statusCode >= 200 && statusCode < 300)) {
+    throw new Error(`download failed: ${statusCode}`);
+  }
+
+  return destPath;
+}
+
+
+
+
+
 
 // ─────────── 공유(카카오/인스타 등) ───────────
 function safeStr(x) { if (typeof x === 'string') return x; if (x == null) return ''; try { return String(x); } catch { return ''; } }
@@ -407,29 +509,81 @@ async function shareToInstagramFeed(payloadOrData = {}, sendToWeb) {
     const src = d.imageUrl || d.url || d.image;
     if (!src) throw new Error('no_image_source');
 
-    // 1) 캡션은 클립보드만 (인스타는 텍스트 파라미터 무시)
-    try {
-      const cap = buildFinalText({ caption: d.caption, hashtags: d.hashtags });
-      if (cap) Clipboard.setString(cap);
-    } catch {}
+    const requestId =
+      payloadOrData?.requestId ??
+      payloadOrData?.data?.requestId ??
+      null;
 
-    // 2) 로컬 JPG 확보 (file://)
+    // 🔹 공유 시작: "인스타 피드 공유 중" 플래그 세팅
+    pendingShareRef.current = {
+      platform: 'INSTAGRAM',
+      requestId,
+      wasBackground: false,   // 아직 백그라운드로 안 내려감
+      done: false,            // 아직 Share.shareSingle 이 성공으로 끝난 적 없음
+    };
+    lastSendToWebRef.current = sendToWeb;
+
+    // 🔹 캡션 → 클립보드
+    try {
+      const cap = buildFinalText({
+        caption: d.caption,
+        hashtags: d.hashtags,
+      });
+      if (cap) Clipboard.setString(cap);
+    } catch {
+      // 클립보드 실패는 무시
+    }
+
+    // 🔹 이미지 로컬 JPG 확보
     const { uri, cleanup } = await ensureLocalFile(src, 'jpg');
 
-    // 3) 인스타만 바로 실행 (시스템 공유 시트 X)
-    await Share.shareSingle({
-      social: Share.Social.INSTAGRAM,
-      url: uri,                 // file://...
-      type: 'image/jpeg',
-      filename: 'share.jpg',
-      failOnCancel: false,
-    });
+    try {
+      // 🔹 인스타 피드 인텐트 실행
+      await Share.shareSingle({
+        social: Share.Social.INSTAGRAM,
+        url: uri,
+        type: 'image/jpeg',
+        filename: 'share.jpg',
+        failOnCancel: true,   // 취소 시 catch 로 감
+      });
 
-    // 4) 즉시 삭제 금지: IG가 비동기로 읽으므로 약간 뒤에 정리
-    setTimeout(() => { cleanup().catch(() => {}); }, 15000);
+      // ⬇ 여기서 "성공 가능성 있음" 표시만 하고,
+      // 진짜 성공 처리(웹에 SHARE_RESULT success)는 AppState 'active'에서 함
+      const cur = pendingShareRef.current;
+      if (cur && cur.platform === 'INSTAGRAM' && cur.requestId === requestId) {
+        pendingShareRef.current = {
+          ...cur,
+          done: true,   // Share.shareSingle 이 에러 없이 끝났다
+        };
+      }
 
-    sendToWeb?.('SHARE_RESULT', { success: true, platform: 'INSTAGRAM', post_id: null });
+    } catch (err) {
+      const msg = String(err?.message || err || '');
+      const isCanceled =
+        err?.code === 'E_USER_CANCELLED' ||
+        err?.code === 'E_SHARE_CANCELED' ||
+        msg.toLowerCase().includes('cancel') ||
+        msg.toLowerCase().includes('dismiss');
+
+      // ❌ 인텐트 창에서 바로 취소/실패한 경우 → 대기 플래그 해제
+      pendingShareRef.current = null;
+
+      // 웹에 “실패/취소” 알림
+      sendToWeb?.('SHARE_RESULT', {
+        success: false,
+        platform: 'INSTAGRAM',
+        error_code: isCanceled ? 'share_canceled' : 'share_failed',
+        message: msg,
+        requestId,
+      });
+    } finally {
+      setTimeout(() => {
+        cleanup().catch(() => {});
+      }, 15000);
+    }
   } catch (err) {
+    // 준비 단계(이미지 없음 등)에서 에러 → 플래그 해제 + 실패 신호
+    pendingShareRef.current = null;
     sendToWeb?.('SHARE_RESULT', {
       success: false,
       platform: 'INSTAGRAM',
@@ -444,39 +598,83 @@ async function shareToInstagramFeed(payloadOrData = {}, sendToWeb) {
 
 // 스토리 버튼도 "인스타만 열기"로 통합 (텍스트/클립보드 없음)
 async function shareToInstagramStories(payloadOrData = {}, sendToWeb) {
-  const TAG = '[IG_STORY_AS_INSTAGRAM]';
+  const TAG = '[IG_STORY]';
   try {
     const d = payloadOrData?.data ?? payloadOrData ?? {};
     const src = d.imageUrl || d.url || d.image;
     if (!src) throw new Error('no_image_source');
 
-    // JPG 로컬 파일 확보 (인스타 호환 좋음)
+    const requestId =
+      payloadOrData?.requestId ??
+      payloadOrData?.data?.requestId ??
+      null;
+
+    // 🔹 공유 시작: "인스타 스토리 공유 진행 중" 플래그
+    pendingShareRef.current = {
+      platform: 'INSTAGRAM_STORIES',
+      requestId,
+      wasBackground: false,   // 아직 백그라운드 기록 없음
+      done: false,            // 아직 Share.shareSingle 성공 안함
+    };
+    lastSendToWebRef.current = sendToWeb; // 혹시나 최신 sendToWeb 저장
+
+    // 1) 로컬 JPG 확보
     const { uri, cleanup } = await ensureLocalFile(src, 'jpg');
 
     try {
-      // ✅ 시스템 공유시트 없이 인스타 앱만 띄우기
+      // 2) 인스타 인텐트 실행
       await Share.shareSingle({
-        social: Share.Social.INSTAGRAM,
-        url: uri,                 // file://...
+        social: Share.Social.INSTAGRAM,   // 인스타 앱만 열기
+        url: uri,
         type: 'image/jpeg',
         filename: 'share.jpg',
-        failOnCancel: false,
+        failOnCancel: true,               // 취소 시 에러로 던지게
       });
 
-      // 파일은 바로 지우지 말고 딜레이(인스타가 읽을 시간)
-      setTimeout(() => { cleanup().catch(() => {}); }, 15000);
+      // ✅ 여기서는 "성공" 신호 보내지 않는다.
+      // 단지 "shareSingle 이 에러 없이 끝났다" = done 플래그만 세팅
+      const cur = pendingShareRef.current;
+      if (cur && cur.platform === 'INSTAGRAM_STORIES' && cur.requestId === requestId) {
+        pendingShareRef.current = {
+          ...cur,
+          done: true,
+        };
+      }
+      // 나머진 AppState('background' → 'active') 쪽에서 처리
 
-      sendToWeb?.('SHARE_RESULT', { success: true, platform: 'INSTAGRAM_STORIES', method: 'single' });
-    } catch (e) {
+    } catch (err) {
+      // 🔹 인텐트에서 에러 / 취소
+      const msg = String(err?.message || err || '');
+      const isCanceled =
+        err?.code === 'E_USER_CANCELLED' ||
+        err?.code === 'E_SHARE_CANCELED' ||
+        msg.toLowerCase().includes('cancel') ||
+        msg.toLowerCase().includes('dismiss');
+
+      // 더 이상 대기 상태 아님
+      pendingShareRef.current = null;
+
+      // 인텐트 단계에서 바로 취소/실패 → 여기서 실패 신호 전송
       sendToWeb?.('SHARE_RESULT', {
-        success: false, platform: 'INSTAGRAM_STORIES',
-        error_code: 'share_failed', message: String(e?.message || e),
+        success: false,
+        platform: 'INSTAGRAM_STORIES',
+        error_code: isCanceled ? 'share_canceled' : 'share_failed',
+        message: msg,
+        requestId,
       });
+    } finally {
+      setTimeout(() => {
+        cleanup().catch(() => {});
+      }, 15000);
     }
   } catch (err) {
+    // 준비 단계 에러 (이미지 없음 등)
+    pendingShareRef.current = null;
     sendToWeb?.('SHARE_RESULT', {
-      success: false, platform: 'INSTAGRAM_STORIES',
-      error_code: 'share_failed', message: String(err?.message || err),
+      success: false,
+      platform: 'INSTAGRAM_STORIES',
+      error_code: 'share_failed',
+      message: String(err?.message || err),
     });
   }
 }
@@ -485,10 +683,17 @@ async function shareToInstagramStories(payloadOrData = {}, sendToWeb) {
 
 
 
-
 // ─────────── App 컴포넌트 ───────────
 const App = () => {
   const webViewRef = useRef(null);
+
+  // 첫 로딩 제어
+  const firstLoadRef = useRef(true);
+
+  // 🔹 상태바 제어용 상태 추가
+  const [statusBarBg, setStatusBarBg] = useState('#ffffff');
+  const [statusBarStyle, setStatusBarStyle] = useState('dark-content');
+
 
   const handledTokensRef = useRef(new Set()); // Set<string>
 
@@ -505,16 +710,55 @@ const App = () => {
   const [mediaSheetVisible, setMediaSheetVisible] = useState(false);
   const preferRef = useRef(null); // 'camera' 선호 여부 보관
 
+  // ✅ 어떤 용도인지 / 몇 장까지 허용할지 기억용
+  const pickerModeRef = useRef({ kind: 'IMAGE_PICKER', max: 1 });
+
+
   const injectJS = (js) => {
     try { webViewRef.current?.injectJavaScript(String(js) + '\ntrue;'); } catch {}
   };
   const emitWebCancel = () => {
+    // 기존: 예전 화면용 콜백
     injectJS(`try { if (window.onCameraCancelled) window.onCameraCancelled(); } catch(e) {}`);
+
+    // ✅ 신규: AdsInquiryWrite에서 쓰는 메시지 방식
+    try {
+      sendToWeb('PICK_IMAGE_CANCEL', {
+        from: 'android_media_picker',
+        reason: 'user_cancel_or_no_image',
+      });
+    } catch (e) {
+      console.log('emitWebCancel sendToWeb error', e);
+    }
   };
-  const emitWebImage = (dataUri) => {
-    // 웹의 receiveCameraImage(dataUri)를 호출
-    injectJS(`try { if (window.receiveCameraImage) window.receiveCameraImage(${JSON.stringify(dataUri)}); } catch(e) {}`);
+
+  // ✅ 여러 장도 보낼 수 있도록 수정된 emitWebImage
+  const emitWebImage = (data) => {
+    // data: "문자열 하나" 또는 ["문자열", "문자열", ...] 배열
+
+    // 1) 옛날 방식 유지용: window.receiveCameraImage 에는 첫 번째 것만 전달
+    const firstUri = Array.isArray(data) ? data[0] : data;
+
+    injectJS(
+      `try {
+         if (window.receiveCameraImage)
+           window.receiveCameraImage(${JSON.stringify(firstUri)});
+       } catch(e) {}`
+    );
+
+    // 2) WebView로 보내는 payload 만들기
+    const payload = Array.isArray(data)
+      ? { dataUrls: data, from: 'android_media_picker' }   // 여러 장
+      : { dataUrls: [data], from: 'android_media_picker' } // 한 장
+
+    try {
+      sendToWeb('PICK_IMAGE_RESULT', payload);
+    } catch (e) {
+      console.log('emitWebImage sendToWeb error', e);
+    }
   };
+
+
 
 
   // ─────────── 외부앱/새창 처리 헬퍼 ───────────
@@ -653,22 +897,63 @@ function shouldAllowWebRequest(req) {
 }
 
 
-  async function pickFromLibrary() {
-    try {
-      const res = await launchImageLibrary({
-        mediaType: 'photo',
-        includeBase64: true,
-        selectionLimit: 1,
-      });
-      if (res.didCancel) { emitWebCancel(); return; }
-      const a = res?.assets?.[0];
-      if (!a?.base64) { emitWebCancel(); return; }
-      const mime = a.type || 'image/jpeg';
-      emitWebImage(`data:${mime};base64,${a.base64}`);
-    } finally {
-      setMediaSheetVisible(false);
+    async function pickFromLibrary() {
+      try {
+        const mode = pickerModeRef.current || { kind: 'IMAGE_PICKER', max: 1 };
+        const rawMax = mode.max && Number.isFinite(mode.max) ? mode.max : 1;
+        const max = Math.min(rawMax, 3);   // ✅ 최대 3장
+
+        const res = await launchImageLibrary({
+          mediaType: 'photo',
+          includeBase64: true,
+          selectionLimit: max,
+        });
+
+        if (res.didCancel) {
+          emitWebCancel();
+          return;
+        }
+
+        const assets = res?.assets || [];
+        if (!assets.length) {
+          emitWebCancel();
+          return;
+        }
+
+        // ✅ 1) 예전 방식: 한 장짜리 IMAGE_PICKER
+        if (mode.kind === 'IMAGE_PICKER') {
+          const a = assets[0];
+          if (!a?.base64) {
+            emitWebCancel();
+            return;
+          }
+          const mime = a.type || 'image/jpeg';
+          const uri = `data:${mime};base64,${a.base64}`;
+          emitWebImage(uri);   // 문자열 하나
+          return;
+        }
+
+        // ✅ 2) 여러 장 선택용 MEDIA_PICKER
+        //    -> base64 있는 것만 골라서 dataURL 배열로 만들기
+        const list = assets
+          .filter((a) => !!a?.base64)
+          .map((a) => {
+            const mime = a.type || 'image/jpeg';
+            return `data:${mime};base64,${a.base64}`;
+          });
+
+        if (!list.length) {
+          emitWebCancel();
+          return;
+        }
+
+        // 🔹 여기서 한 번에 배열로 보내기
+        emitWebImage(list);   // ["data:...","data:..."] 이런 형태
+      } finally {
+        setMediaSheetVisible(false);
+      }
     }
-  }
+
   async function takePhoto() {
     try {
       const res = await launchCamera({
@@ -688,7 +973,7 @@ function shouldAllowWebRequest(req) {
 
   const [installId, setInstallId] = useState(null);
   const [webTextZoom, setWebTextZoom] = useState(100);
-
+  const [appVersion, setAppVersion] = useState(null);
   // 시스템 폰트 배율(접근성 글자 크기) → 100 단위로 환산
   const getSystemTextZoom = useCallback(() => {
     try {
@@ -720,11 +1005,15 @@ function shouldAllowWebRequest(req) {
   }
 
 
+    // 버전 제어
   useEffect(() => {
     let mounted = true;
     (async () => {
       const id = await getOrCreateInstallId();
       if (mounted) setInstallId(id);
+      const version = await DeviceInfo.getVersion();
+      console.log('현재 버전:', version);
+      if (mounted) setAppVersion(version);
     })();
     return () => { mounted = false; };
   }, []);
@@ -737,6 +1026,56 @@ function shouldAllowWebRequest(req) {
       webViewRef.current?.postMessage(msg);
     } catch (e) { console.log('❌ postMessage error:', e); }
   }, []);
+
+    useEffect(() => {
+      lastSendToWebRef.current = sendToWeb;
+    }, [sendToWeb]);
+
+    // 인스타 공유 후, 앱으로 복귀했을 때 final로 넘어가게 하는 리스너
+    useEffect(() => {
+      const sub = AppState.addEventListener('change', (state) => {
+        const pending = pendingShareRef.current;
+        const sendToWeb = lastSendToWebRef.current;
+
+        // 진행 중 공유가 없거나, 웹쪽으로 보낼 통로가 없으면 무시
+        if (!pending || !sendToWeb) return;
+
+        if (state === 'background') {
+          // 인스타/공유 인텐트로 나갈 때: background 기록
+          pendingShareRef.current = {
+            ...pending,
+            wasBackground: true,
+          };
+          return;
+        }
+
+        if (state === 'active') {
+          // ✨ 여기서 핵심: "진짜 성공" 기준
+          // 1) 공유 함수에서 Share.shareSingle 이 성공으로 끝남 → pending.done === true
+          // 2) 그 사이에 한번 background 를 거쳤음 → pending.wasBackground === true
+          if (pending.wasBackground && pending.done) {
+            const { platform, requestId } = pending;
+
+            // 더 이상 대기 상태 아님
+            pendingShareRef.current = null;
+
+            // 웹으로 성공 신호
+            sendToWeb('SHARE_RESULT', {
+              success: true,
+              platform,      // 'INSTAGRAM' or 'INSTAGRAM_STORIES'
+              requestId,
+              source: 'resume', // 디버깅용
+            });
+          }
+        }
+      });
+
+      return () => {
+        sub.remove();
+      };
+    }, []);
+
+
 
   // Splash
   const hideSplashRespectingMin = useCallback(() => {
@@ -831,7 +1170,7 @@ function shouldAllowWebRequest(req) {
 
       // (디버그) 등록된 단건 상품 조회
       try {
-        const prods = await RNIAP.getProducts({ skus: [ANDROID_INAPP_BASIC] });
+        const prods = await RNIAP.getProducts({ skus: ANDROID_INAPP_BASIC });
         DBG.log('getProducts.len=', prods?.length || 0);
         DBG.chunk('getProducts.items', prods);
       } catch (e) {
@@ -844,6 +1183,7 @@ function shouldAllowWebRequest(req) {
           DBG.chunk('purchaseUpdated.payload', p);
 
           const id = orderId || purchaseToken || transactionId || null;
+          const isOneTime = ANDROID_INAPP_BASIC.includes(productId);
 
           // ====== 동일 토큰 중복 처리 방지 ======
           if (purchaseToken && handledTokensRef.current.has(purchaseToken)) {
@@ -852,7 +1192,7 @@ function shouldAllowWebRequest(req) {
           }
 
           // ── 단건(Consumable) 처리: 베이직(wm_basic_n)
-          if (productId === ANDROID_INAPP_BASIC) {
+          if (isOneTime) {
             try {
               // v14 표준: 구매 객체 p 넘기고 consumable=true
               // await RNIAP.finishTransaction(p, true);
@@ -934,6 +1274,7 @@ function shouldAllowWebRequest(req) {
             success: true, platform: 'android',
             product_id: productId || '',
             transaction_id: id,
+            purchase_token: purchaseToken,
             acknowledged: true,
           });
           endIap();
@@ -1206,15 +1547,129 @@ function shouldAllowWebRequest(req) {
         case 'CHECK_PERMISSION': await handleCheckPermission(); break;
         case 'REQUEST_PERMISSION': await handleRequestPermission(); break;
 
-        case 'OPEN_MEDIA_PICKER': {
-          // 바텀시트 열고, prefer가 camera면 바로 카메라 띄워도 됨(원하면)
-          const prefer = data?.payload?.prefer || null;
-          preferRef.current = prefer;
-          setMediaSheetVisible(true);
-          // 만약 prefer === 'camera'면 바로 takePhoto() 호출하도록 바꾸고 싶으면:
-          // if (prefer === 'camera') { takePhoto(); } else { setMediaSheetVisible(true); }
+        case 'DOWNLOAD_FILE': {
+          console.log('[RN][DOWNLOAD_FILE] start', data);
+          try {
+            const { url, filename } = data.payload || {};
+            console.log('[RN][DOWNLOAD_FILE] payload', url, filename);
+
+            const path = await downloadFileToDevice(url, filename);
+            console.log('[RN][DOWNLOAD_FILE] success path=', path);
+            sendToWeb('DOWNLOAD_FILE_RESULT', {
+                  ok: true,
+                  path,       // 기기 내 저장 경로
+                  filename,   // 원본 파일명
+                });
+          } catch (err) {
+            console.log('[DOWNLOAD_FILE][error]', err);
+            sendToWeb('DOWNLOAD_FILE_RESULT', {
+                  ok: false,
+                  error: String(err?.message || err),
+                });
+
+            // Alert.alert('다운로드 실패', String(err?.message || err));
+          }
           break;
         }
+
+
+
+        case 'OPEN_APP_STORE': {
+          try {
+            if (Platform.OS === 'android') {
+              Linking.openURL('market://details?id=com.wizmarket')
+                .catch(() => {
+                  Linking.openURL(
+                    'https://play.google.com/store/apps/details?id=com.wizmarket'
+                  );
+                });
+            } else {
+              // TODO: iOS 실제 앱스토어 URL로 교체
+              Linking.openURL('https://apps.apple.com/kr/app/your-app-id');
+            }
+          } catch (e) {
+            console.log('[OPEN_APP_STORE][ERR]', e);
+          }
+          break;
+        }
+
+
+        case 'WEB_LOADING_DONE': {
+                // 부팅 타임아웃 쓰고 있으면 정리
+                if (bootTORef.current) {
+                  clearTimeout(bootTORef.current);
+                  bootTORef.current = null;
+                }
+
+                // 스플래시 최소 노출시간 지키면서 페이드 아웃
+                hideSplashRespectingMin();
+                break;
+              }
+
+        case 'SET_STATUS_BAR': {
+                  const bg = data?.payload?.backgroundColor || '#ffffff';
+                  const styleKey = data?.payload?.style === 'light' ? 'light-content' : 'dark-content';
+
+                  // console.log('[SET_STATUS_BAR]', bg, styleKey);
+
+                  // 🔹 명령형 호출 대신 상태 업데이트만
+                  setStatusBarBg(bg);
+                  setStatusBarStyle(styleKey);
+                  break;
+                }
+
+        case 'GET_APP_VERSION': {
+                sendToWeb('APP_VERSION', {
+                  app_version: appVersion ?? 'unknown',
+                  ts: Date.now(),
+                });
+                break;
+              }
+        case 'COPY_TO_CLIPBOARD': {
+          const text = data?.payload?.text || '';
+          try {
+            if (text) {
+              Clipboard.setString(text);   // ✅ 네이티브에서 클립보드 복사
+              sendToWeb('COPY_TO_CLIPBOARD_RESULT', {
+                success: true,
+                length: text.length,
+              });
+            } else {
+              sendToWeb('COPY_TO_CLIPBOARD_RESULT', {
+                success: false,
+                error: 'empty_text',
+              });
+            }
+          } catch (e) {
+            sendToWeb('COPY_TO_CLIPBOARD_RESULT', {
+              success: false,
+              error: String(e?.message || e),
+            });
+          }
+          break;
+        }
+
+
+
+
+        case 'OPEN_MEDIA_PICKER': {
+                    const prefer = data?.payload?.prefer || null;
+                    const max = data?.payload?.max && Number.isFinite(data.payload.max)
+                      ? Math.max(1, Math.min(3, data.payload.max))
+                      : 3;
+
+                    pickerModeRef.current = { kind: 'MEDIA_PICKER', max };
+                    preferRef.current = prefer;
+                    setMediaSheetVisible(true);
+                    break;
+        }
+        case 'OPEN_IMAGE_PICKER': {
+                  const prefer = data?.payload?.prefer || null;
+                  pickerModeRef.current = { kind: 'IMAGE_PICKER', max: 1 };
+                  preferRef.current = prefer;
+                  setMediaSheetVisible(true);
+                  break;
+                }
 
         // 글자 크기대로 반영
         case 'TEXT_ZOOM': {
@@ -1241,7 +1696,7 @@ function shouldAllowWebRequest(req) {
           if (!beginIap('subscription', { sku })) { DBG.log('IAP busy. ignore'); break; }
 
           // 🔒 세이프가드: 베이직(인앱)이 구독 경로로 들어오면 '단건'으로 재라우팅
-          if (sku === ANDROID_INAPP_BASIC /* 'wm_basic_n' */) {
+          if (ANDROID_INAPP_BASIC.includes(sku)) {
             DBG.log('route_fix', 'in-app SKU on subscription path → buying one-time');
             if (Platform.OS === 'android') await buyAndroidOneTime(sku);
             else await buyIOSOneTime(sku);
@@ -1276,10 +1731,15 @@ function shouldAllowWebRequest(req) {
           DBG.log('START_ONE_TIME_PURCHASE recv sku=', sku);
  
           if (!beginIap('one_time', { sku })) { DBG.log('IAP busy. ignore'); break; }
-          if (!sku) {
-            sendToWeb('PURCHASE_RESULT', { success: false, platform: Platform.OS, error_code: 'bad_sku', message: 'no sku' });
-            endIap();
-            break;
+          if (!sku || !ANDROID_INAPP_BASIC.includes(sku)) {
+              sendToWeb('PURCHASE_RESULT', {
+                success: false,
+                platform: Platform.OS,
+                error_code: 'bad_sku',
+                message: `invalid one-time sku: ${sku}`,
+              });
+              endIap();
+              break;
           }
 
           if (Platform.OS === 'android') {
@@ -1326,7 +1786,7 @@ function shouldAllowWebRequest(req) {
             else if (dataUrl) await saveDataUrlToGallery(dataUrl, safeName);
             else throw new Error('no_url_or_dataUrl');
             sendToWeb('DOWNLOAD_RESULT', { success: true, filename: safeName });
-            Alert.alert('완료', '이미지가 갤러리에 저장되었습니다.');
+            // Alert.alert('완료', '이미지가 갤러리에 저장되었습니다.');
           } catch (err) {
             console.log('[DOWNLOAD_IMAGE][error]', err);
             sendToWeb('DOWNLOAD_RESULT', { success: false, error_code: 'save_failed', message: String(err?.message || err) });
@@ -1399,18 +1859,38 @@ function shouldAllowWebRequest(req) {
 
   // WebView load
   const onWebViewLoadStart = useCallback(() => {
-    showSplashOnce();
-    if (bootTORef.current) clearTimeout(bootTORef.current);
-    bootTORef.current = setTimeout(() => { sendToWeb('OFFLINE_FALLBACK', { reason: 'timeout', at: Date.now() }); }, BOOT_TIMEOUT_MS);
+    // ⭐ 앱 첫 로딩 때만 스플래시 사용
+    if (firstLoadRef.current) {
+      firstLoadRef.current = false;       // 다음부터는 안 씀
+      showSplashOnce();
+
+      if (bootTORef.current) clearTimeout(bootTORef.current);
+      bootTORef.current = setTimeout(() => {
+        sendToWeb('OFFLINE_FALLBACK', { reason: 'timeout', at: Date.now() });
+      }, BOOT_TIMEOUT_MS);
+    } else {
+      // 두 번째 이후 로딩은 스플래시 안 띄우고,
+      // 필요하면 타임아웃만 걸거나 아예 아무것도 안 해도 됨.
+      if (bootTORef.current) clearTimeout(bootTORef.current);
+      // 뒤 로딩에 대해서는 OFFLINE_FALLBACK도 안 쓰고 싶으면 아래도 빼도 됨.
+      // bootTORef.current = setTimeout(...);  // 이 줄 제거 가능
+    }
   }, [showSplashOnce, sendToWeb]);
 
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
-        <StatusBar barStyle="dark-content" backgroundColor="#ffffff" />
+      <SafeAreaView
+          style={[styles.container, { backgroundColor: statusBarBg }]}
+          edges={['top', 'bottom']}
+        >
+       <StatusBar
+                 barStyle={statusBarStyle}
+                 backgroundColor={statusBarBg}
+                 animated={true}
+               />
         <WebView
           ref={webViewRef}
-          source={{ uri: 'http://www.wizmarket.ai/ads/start' }}
+          source={{ uri: 'https://www.wizmarket.ai/ads/start' }}
 
           originWhitelist={['*']}              // 느슨하게 허용
             onShouldStartLoadWithRequest={shouldAllowWebRequest}
@@ -1523,7 +2003,9 @@ function shouldAllowWebRequest(req) {
         />
         {splashVisible && (
           <SafeAreaInsetOverlay opacity={splashFade}>
-            <SplashScreenRN />
+            <SplashScreenRN
+              brandBg="#272930"   // 배경만 지정
+            />
           </SafeAreaInsetOverlay>
         )}
 
@@ -1552,14 +2034,14 @@ function shouldAllowWebRequest(req) {
               onPress={takePhoto}
               style={{ paddingVertical:14, alignItems:'center' }}
             >
-              <Text style={{ fontSize:16, fontWeight:'600' }}>카메라로 촬영</Text>
+              <Text style={{ fontSize:16, fontWeight:'600', color: '#111827' }}>카메라 촬영</Text>
             </Pressable>
             <View style={{ height:1, backgroundColor:'#eee' }} />
             <Pressable
               onPress={pickFromLibrary}
               style={{ paddingVertical:14, alignItems:'center' }}
             >
-              <Text style={{ fontSize:16, fontWeight:'600' }}>갤러리에서 선택</Text>
+              <Text style={{ fontSize:16, fontWeight:'600', color: '#111827' }}>앨범 선택</Text>
             </Pressable>
             {/* 취소 버튼은 안 넣고, 바깥 탭으로만 닫히게 요구하셨으니 이대로 */}
           </View>
@@ -1587,7 +2069,7 @@ function SafeAreaInsetOverlay({ opacity, children }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff' },
+  container: { flex: 1 },
 });
 
 export default App;

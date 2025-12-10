@@ -52,7 +52,7 @@ adb shell monkey -p com.wizmarket -c android.intent.category.LAUNCHER 1
 
 
 # 에뮬레이터 실행 방법
-cd C:\workspace\wizmarketingRN\android
+cd C:\workspace\wizmarketingRN_Custom\android
 .\gradlew clean
 .\gradlew :app:installPlayDebug -PreactNativeDevServerPort=8081
 
@@ -69,3 +69,6 @@ cd C:\workspace\wizmarketingRN_Custom\android
 
 # 장소
 # app/build/outputs/bundle/playRelease/~~.aab
+
+# 스플래시 이미지 수정
+# SplashScreenRN.js

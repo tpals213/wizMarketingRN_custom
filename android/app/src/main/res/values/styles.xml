@@ -9,6 +9,7 @@
 
   <!-- 스플래시 테마: 보라 배경 -->
   <style name="SplashTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
+    <item name="android:windowIsTranslucent">true</item>
     <item name="android:windowBackground">@color/splash_background</item>
     <item name="android:statusBarColor">@color/splash_background</item>
     <item name="android:navigationBarColor">@color/splash_background</item>
