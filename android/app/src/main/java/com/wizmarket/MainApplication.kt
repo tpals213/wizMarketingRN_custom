@@ -15,7 +15,7 @@ import com.kakao.sdk.common.KakaoSdk
 import com.wizmarket.kakao.KakaoLoginPackage
 import com.wizmarket.share.KakaoSharePackage
 import com.wizmarket.share.BandSharePackage
-
+import com.wizmarket.share.AppUtilPackage
 class MainApplication : Application(), ReactApplication {
 
   override val reactNativeHost: ReactNativeHost =
@@ -29,6 +29,7 @@ class MainApplication : Application(), ReactApplication {
               // packages.add(CameraRollPackage())
                 packages.add(KakaoSharePackage())
                 packages.add(BandSharePackage())
+                packages.add(AppUtilPackage())
                 return packages
             }
 

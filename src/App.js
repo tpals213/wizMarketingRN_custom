@@ -27,6 +27,7 @@ import SplashScreenRN from './SplashScreenRN';
 import ImageResizer from 'react-native-image-resizer';
 import { NativeModules } from 'react-native';
 const { KakaoLoginModule } = NativeModules;
+const { AppUtilModule } = NativeModules;
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DeviceInfo from 'react-native-device-info';
 
@@ -331,6 +332,40 @@ async function ensureLocalFile(src, preferExt = 'jpg') {
   const out = tmpPath.startsWith('file://') ? tmpPath : `file://${tmpPath}`;
   return { uri: out, cleanup: async () => { try { await RNFS.unlink(tmpPath); } catch { } } };
 }
+const ANDROID_PACKAGE_MAP = {
+  INSTAGRAM: 'com.instagram.android',
+  INSTAGRAM_STORIES: 'com.instagram.android',
+  FACEBOOK: 'com.facebook.katana',
+  KAKAO: 'com.kakao.talk',
+  BAND: 'com.nhn.android.band',
+};
+
+const ANDROID_STORE_URL_MAP = {
+  INSTAGRAM: 'https://play.google.com/store/apps/details?id=com.instagram.android',
+  INSTAGRAM_STORIES: 'https://play.google.com/store/apps/details?id=com.instagram.android',
+  FACEBOOK: 'https://play.google.com/store/apps/details?id=com.facebook.katana',
+  KAKAO: 'https://play.google.com/store/apps/details?id=com.kakao.talk',
+  BAND: 'https://play.google.com/store/apps/details?id=com.nhn.android.band',
+};
+
+async function openStoreForSocial(key: string) {
+  if (Platform.OS !== 'android') return;
+
+  const pkg = ANDROID_PACKAGE_MAP[key];
+  if (!pkg) return;
+
+  const marketUrl = `market://details?id=${pkg}`;
+  const webUrl = ANDROID_STORE_URL_MAP[key];
+
+  try {
+    await Linking.openURL(marketUrl);
+  } catch {
+    if (webUrl) {
+      await Linking.openURL(webUrl);
+    }
+  }
+}
+
 
 // 공유 핸들러(중략 없이 유지)
 async function handleShareToChannel(payload, sendToWeb) {
@@ -341,6 +376,36 @@ async function handleShareToChannel(payload, sendToWeb) {
   let file = data.imageUrl || data.url || data.image;
 
   try {
+
+    // 0) 인스타 / 인스타 스토리는 먼저 "앱 설치 여부" 검사
+        if (key === 'INSTAGRAM' || key === 'INSTAGRAM_STORIES') {
+          let installed = true;
+          try {
+            installed = await AppUtilModule.isAppInstalled('com.instagram.android');
+          } catch (e) {
+            console.warn('[SHARE] isAppInstalled error:', e);
+            // 여기서 false로 두면 네이티브 에러 때문에 괜히 스토어로 튈 수 있으니 true 유지
+            installed = true;
+          }
+
+          if (!installed) {
+            try {
+              await openStoreForSocial(key); // 내부에서 INSTAGRAM 패키지로 매핑
+            } catch (e) {
+              console.warn('[SHARE] openStoreForSocial error:', e);
+            }
+
+            // 웹에도 "앱 없음" 신호 보내주기
+            sendToWeb?.('SHARE_RESULT', {
+              success: false,
+              platform: key,
+              error_code: 'app_not_installed',
+              message: 'Instagram app is not installed.',
+            });
+            return; // ⬅⬅⬅ 여기서 끝내야 shareToInstagram* 안 타고 종료
+          }
+        }
+
     const needClipboard = [Share.Social.INSTAGRAM, Share.Social.INSTAGRAM_STORIES, Share.Social.FACEBOOK].includes(social);
     if (needClipboard && text) { Clipboard.setString(text); sendToWeb('TOAST', { message: '캡션이 복사되었어요. 업로드 화면에서 붙여넣기 하세요.' }); }
     const ext = guessExt(file) || 'jpg';
@@ -363,12 +428,24 @@ async function handleShareToChannel(payload, sendToWeb) {
       const fileUrl = `file://${dlPath}`;
       // const kMime = extToMime(kExt) || 'image/*';
       // await Share.open({ title: '카카오톡으로 공유', url: fileUrl, type: kMime, filename: `share.${kExt}`, message: pasteText, failOnCancel: false });
-      const { KakaoShareModule } = NativeModules;
-      await KakaoShareModule.shareImageFile(fileUrl, pasteText);
+      try {
+          const { KakaoShareModule } = NativeModules;
+          await KakaoShareModule.shareImageFile(fileUrl, pasteText);
 
+          sendToWeb('SHARE_RESULT', { success: true, platform: key, post_id: null });
+        } catch (e) {
+          // 🔥 여기서 카카오 미설치 → 플레이스토어 이동
+          await openStoreForSocial(key);
 
-      sendToWeb('SHARE_RESULT', { success: true, platform: key, post_id: null });
-      return;
+          sendToWeb('SHARE_RESULT', {
+            success: false,
+            platform: key,
+            error_code: e?.code || 'share_failed',
+            message: String(e?.message || e),
+          });
+        }
+
+        return;
     } else if (key === 'BAND') {
       const src = data.imageUrl || data.url || data.image;
       if (!src) throw new Error('no_image_for_band');
@@ -383,6 +460,7 @@ async function handleShareToChannel(payload, sendToWeb) {
         sendToWeb('SHARE_RESULT', { success: true, platform: key, post_id: null });
       } catch (e) {
         // 미설치면 store로 이동 시도 → 여기로 reject 들어옴
+        await openStoreForSocial(key);
         sendToWeb('SHARE_RESULT', {
           success: false, platform: key,
           error_code: e?.code || 'share_failed',
@@ -568,6 +646,7 @@ async function shareToInstagramFeed(payloadOrData = {}, sendToWeb) {
       // ❌ 인텐트 창에서 바로 취소/실패한 경우 → 대기 플래그 해제
       pendingShareRef.current = null;
 
+
       // 웹에 “실패/취소” 알림
       sendToWeb?.('SHARE_RESULT', {
         success: false,
@@ -598,6 +677,7 @@ async function shareToInstagramFeed(payloadOrData = {}, sendToWeb) {
 
 // 스토리 버튼도 "인스타만 열기"로 통합 (텍스트/클립보드 없음)
 async function shareToInstagramStories(payloadOrData = {}, sendToWeb) {
+
   const TAG = '[IG_STORY]';
   try {
     const d = payloadOrData?.data ?? payloadOrData ?? {};
@@ -653,6 +733,8 @@ async function shareToInstagramStories(payloadOrData = {}, sendToWeb) {
 
       // 더 이상 대기 상태 아님
       pendingShareRef.current = null;
+
+
 
       // 인텐트 단계에서 바로 취소/실패 → 여기서 실패 신호 전송
       sendToWeb?.('SHARE_RESULT', {
@@ -1546,6 +1628,13 @@ function shouldAllowWebRequest(req) {
         case 'WEB_ERROR': await handleWebError(data.payload); break;
         case 'CHECK_PERMISSION': await handleCheckPermission(); break;
         case 'REQUEST_PERMISSION': await handleRequestPermission(); break;
+
+        case 'OPEN_NOTIFICATION_SETTINGS': {
+          if (AppUtilModule?.openAppNotificationSettings) {
+            AppUtilModule.openAppNotificationSettings();
+          }
+          break;
+        }
 
         case 'DOWNLOAD_FILE': {
           console.log('[RN][DOWNLOAD_FILE] start', data);
