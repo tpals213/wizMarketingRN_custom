@@ -366,6 +366,56 @@ async function openStoreForSocial(key: string) {
   }
 }
 
+// ─────────── "앱이 필요합니다" 공통 Alert 헬퍼 ───────────
+function alertAppMissingAndMaybeOpenStore({
+  key,          // 'INSTAGRAM' | 'INSTAGRAM_STORIES' | 'KAKAO' | 'BAND' ...
+  appName,      // "인스타그램", "카카오톡", "밴드" 등
+  sendToWeb,    // sendToWeb 함수
+  errorMessage, // 원래 에러 메시지 (선택)
+}) {
+  Alert.alert(
+    `${appName}이 필요합니다`,
+    `이 기능을 사용하려면 ${appName} 앱이 설치되어야 합니다.\n스토어로 이동할까요?`,
+    [
+      {
+        text: '취소',
+        style: 'cancel',
+        onPress: () => {
+          // 취소한 경우에도 웹에는 "실패" 전달
+          sendToWeb?.('SHARE_RESULT', {
+            success: false,
+            platform: key,
+            error_code: 'app_not_installed',
+            cancelled: true,
+            message: errorMessage || 'user_cancelled_store',
+          });
+        },
+      },
+      {
+        text: '이동',
+        onPress: async () => {
+          try {
+            await openStoreForSocial(key);
+          } catch (e) {
+            console.warn('[SHARE] openStoreForSocial error:', e);
+          }
+
+          // 스토어로 이동시킨 뒤에도 상태 전달
+          sendToWeb?.('SHARE_RESULT', {
+            success: false,
+            platform: key,
+            error_code: 'app_not_installed',
+            openedStore: true,
+            message: errorMessage || `${appName}_app_not_installed`,
+          });
+        },
+      },
+    ],
+    { cancelable: true }
+  );
+}
+
+
 
 // 공유 핸들러(중략 없이 유지)
 async function handleShareToChannel(payload, sendToWeb) {
@@ -389,20 +439,13 @@ async function handleShareToChannel(payload, sendToWeb) {
           }
 
           if (!installed) {
-            try {
-              await openStoreForSocial(key); // 내부에서 INSTAGRAM 패키지로 매핑
-            } catch (e) {
-              console.warn('[SHARE] openStoreForSocial error:', e);
-            }
-
-            // 웹에도 "앱 없음" 신호 보내주기
-            sendToWeb?.('SHARE_RESULT', {
-              success: false,
-              platform: key,
-              error_code: 'app_not_installed',
-              message: 'Instagram app is not installed.',
+            alertAppMissingAndMaybeOpenStore({
+              key,
+              appName: '인스타그램',
+              sendToWeb,
+              errorMessage: 'instagram_app_not_installed',
             });
-            return; // ⬅⬅⬅ 여기서 끝내야 shareToInstagram* 안 타고 종료
+            return;
           }
         }
 
@@ -435,14 +478,12 @@ async function handleShareToChannel(payload, sendToWeb) {
           sendToWeb('SHARE_RESULT', { success: true, platform: key, post_id: null });
         } catch (e) {
           // 🔥 여기서 카카오 미설치 → 플레이스토어 이동
-          await openStoreForSocial(key);
-
-          sendToWeb('SHARE_RESULT', {
-            success: false,
-            platform: key,
-            error_code: e?.code || 'share_failed',
-            message: String(e?.message || e),
-          });
+          alertAppMissingAndMaybeOpenStore({
+                    key,
+                    appName: '카카오톡',
+                    sendToWeb,
+                    errorMessage: String(e?.message || e),
+                  });
         }
 
         return;
@@ -460,12 +501,13 @@ async function handleShareToChannel(payload, sendToWeb) {
         sendToWeb('SHARE_RESULT', { success: true, platform: key, post_id: null });
       } catch (e) {
         // 미설치면 store로 이동 시도 → 여기로 reject 들어옴
-        await openStoreForSocial(key);
-        sendToWeb('SHARE_RESULT', {
-          success: false, platform: key,
-          error_code: e?.code || 'share_failed',
-          message: String(e?.message || e),
-        });
+        console.warn('[BAND_SHARE] error:', e);
+                alertAppMissingAndMaybeOpenStore({
+                  key,
+                  appName: '밴드',
+                  sendToWeb,
+                  errorMessage: String(e?.message || e),
+                });
       }
       return;
     }
@@ -787,6 +829,22 @@ const App = () => {
   const [token, setToken] = useState('');
   const lastPushTokenRef = useRef('');
   const lastNavStateRef = useRef({});
+
+  // 스플래시 로딩 제어
+  const [webReadyDone, setWebReadyDone] = useState(false);
+  const [splashAnimDone, setSplashAnimDone] = useState(false);
+
+  // 두 조건 다 true일 때만 스플래시를 숨기는 함수
+  const tryHideSplash = useCallback(() => {
+    if (!webReadyDone || !splashAnimDone) return;
+
+    Animated.timing(splashFade, {
+      toValue: 0,
+      duration: 300,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    }).start(() => setSplashVisible(false));
+  }, [webReadyDone, splashAnimDone, splashFade]);
 
 
   const [mediaSheetVisible, setMediaSheetVisible] = useState(false);
@@ -1191,10 +1249,21 @@ function shouldAllowWebRequest(req) {
 
   // Web ready/error
   const handleWebReady = useCallback(() => {
-    if (bootTORef.current) { clearTimeout(bootTORef.current); bootTORef.current = null; }
-    sendToWeb('WEB_READY_ACK', { at: Date.now(), install_id: installId ?? 'unknown' });
-    hideSplashRespectingMin();
-  }, [hideSplashRespectingMin, sendToWeb, installId]);
+    if (bootTORef.current) {
+      clearTimeout(bootTORef.current);
+      bootTORef.current = null;
+    }
+
+    // 웹에서 기다리는 핸드셰이크는 그대로 유지
+    sendToWeb('WEB_READY_ACK', {
+      at: Date.now(),
+      install_id: installId ?? 'unknown',
+    });
+
+    // ⛔ 여기서는 스플래시를 내리지 않는다
+    // 스플래시 hide는 WEB_LOADING_DONE 기준으로만 처리
+  }, [sendToWeb, installId]);
+
 
   const handleWebError = useCallback((payload) => {
     if (bootTORef.current) { clearTimeout(bootTORef.current); bootTORef.current = null; }
@@ -1684,16 +1753,19 @@ function shouldAllowWebRequest(req) {
 
 
         case 'WEB_LOADING_DONE': {
-                // 부팅 타임아웃 쓰고 있으면 정리
-                if (bootTORef.current) {
-                  clearTimeout(bootTORef.current);
-                  bootTORef.current = null;
-                }
+          if (bootTORef.current) {
+            clearTimeout(bootTORef.current);
+            bootTORef.current = null;
+          }
 
-                // 스플래시 최소 노출시간 지키면서 페이드 아웃
-                hideSplashRespectingMin();
-                break;
-              }
+          // 👉 웹은 준비 완료
+          setWebReadyDone(true);
+
+          // 👉 애니메이션도 끝났다면 지금 바로 스플래시 내림
+          tryHideSplash();
+          break;
+        }
+
 
         case 'SET_STATUS_BAR': {
                   const bg = data?.payload?.backgroundColor || '#ffffff';
@@ -2062,8 +2134,8 @@ function shouldAllowWebRequest(req) {
 
           // onMessage={onMessageFromWeb}
           onLoadStart={onWebViewLoadStart}
-          onLoadProgress={({ nativeEvent }) => { if (nativeEvent.progress >= 0.9) hideSplashRespectingMin(); }}
-          onLoadEnd={() => { hideSplashRespectingMin(); }}
+          // onLoadProgress={({ nativeEvent }) => { if (nativeEvent.progress >= 0.9) hideSplashRespectingMin(); }}
+          // onLoadEnd={() => { hideSplashRespectingMin(); }}
           javaScriptEnabled
           domStorageEnabled
           focusable
@@ -2093,8 +2165,12 @@ function shouldAllowWebRequest(req) {
         {splashVisible && (
           <SafeAreaInsetOverlay opacity={splashFade}>
             <SplashScreenRN
-              brandBg="#272930"   // 배경만 지정
-            />
+                  brandBg="#272930"
+                  onFirstCycleEnd={() => {
+                  setSplashAnimDone(true);
+                   tryHideSplash();
+                  }}
+                />
           </SafeAreaInsetOverlay>
         )}
 
