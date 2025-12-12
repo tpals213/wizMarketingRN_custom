@@ -48,11 +48,11 @@ class BandShareModule(private val reactContext: ReactApplicationContext)
                 promise.resolve(true)
             } catch (anf: ActivityNotFoundException) {
                 // 밴드 미설치 → 스토어 이동
-                try {
-                    reactContext.startActivity(
-                        Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$PKG_BAND")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    )
-                } catch (_: Exception) {}
+//                try {
+//                    reactContext.startActivity(
+//                        Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$PKG_BAND")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+//                    )
+//                } catch (_: Exception) {}
                 promise.reject("band_not_installed", "BAND not installed")
             }
         } catch (e: Exception) {

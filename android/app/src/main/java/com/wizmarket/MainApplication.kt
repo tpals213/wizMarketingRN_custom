@@ -16,6 +16,8 @@ import com.wizmarket.kakao.KakaoLoginPackage
 import com.wizmarket.share.KakaoSharePackage
 import com.wizmarket.share.BandSharePackage
 import com.wizmarket.share.AppUtilPackage
+import com.wizmarket.share.InstagramStorySharePackage
+import com.wizmarket.share.InstagramFeedSharePackage
 class MainApplication : Application(), ReactApplication {
 
   override val reactNativeHost: ReactNativeHost =
@@ -29,6 +31,8 @@ class MainApplication : Application(), ReactApplication {
               // packages.add(CameraRollPackage())
                 packages.add(KakaoSharePackage())
                 packages.add(BandSharePackage())
+                packages.add(InstagramStorySharePackage())
+                packages.add(InstagramFeedSharePackage())
                 packages.add(AppUtilPackage())
                 return packages
             }

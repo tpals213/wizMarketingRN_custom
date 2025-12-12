@@ -28,6 +28,8 @@ import ImageResizer from 'react-native-image-resizer';
 import { NativeModules } from 'react-native';
 const { KakaoLoginModule } = NativeModules;
 const { AppUtilModule } = NativeModules;
+const { InstagramStoryShareModule } = NativeModules;
+const { InstagramFeedShareModule } = NativeModules;
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DeviceInfo from 'react-native-device-info';
 
@@ -554,76 +556,8 @@ async function openManageSubscriptionAndroid({ packageName, sku } = {}) {
   return Linking.openURL('https://play.google.com/store/account/subscriptions');
 }
 
-// ───────── Instagram 전용 공유 함수 (DM 방지 완전판) ─────────
-// 규칙: message 절대 넘기지 않음, 로컬 file:// 경로만 전달, 캡션은 클립보드만.
-
-// ──────────────────────────────────────────────────────────────
-// Instagram 피드 공유(간단 로그 포함)
-// ──────────────────────────────────────────────────────────────
-// async function shareToInstagramFeed(payloadOrData = {}, sendToWeb) {
-//   const TAG = '[IG_FEED]';
-//   try {
-//     console.log(`${TAG} enter`, typeof payloadOrData, Date.now());
-
-//     // payloadOrData: { data: { image|url|imageUrl, caption, hashtags }, ... } | { image|url|imageUrl, ... }
-//     const d = payloadOrData?.data ?? payloadOrData ?? {};
-//     const src = d.imageUrl || d.url || d.image;
-//     console.log(`${TAG} payload.keys`, Object.keys(d || {}));
-//     console.log(`${TAG} src`, src ? (String(src).slice(0, 120) + (String(src).length > 120 ? '…' : '')) : 'null');
-
-//     if (!src) {
-//       console.log(`${TAG} no_image_source`);
-//       throw new Error('no_image_source');
-//     }
-
-//     // 1) 캡션은 클립보드로만 (텍스트를 Share 파라미터로 보내면 DM로 라우팅 위험)
-//     try {
-//       const cap = buildFinalText({
-//         caption: d.caption,
-//         hashtags: d.hashtags,
-//         couponEnabled: false,
-//         link: undefined, // 인스타 캡션에는 링크 넣지 않음
-//       });
-//       if (cap) {
-//         Clipboard.setString(cap);
-//         console.log(`${TAG} caption_to_clipboard length=`, cap.length);
-//       } else {
-//         console.log(`${TAG} caption empty`);
-//       }
-//     } catch (e) {
-//       console.log(`${TAG} caption_clipboard_error`, String(e?.message || e));
-//     }
-
-//     // 2) 이미지 로컬 파일 확보 (jpg 권장)
-//     console.log(`${TAG} ensureLocalFile start`);
-//     const { uri, cleanup } = await ensureLocalFile(src, 'jpg');
-//     console.log(`${TAG} ensureLocalFile ok`, uri);
-
-//     try {
-//       // 3) 인스타 피드 — 텍스트 금지, 강제 타겟팅
-//       console.log(`${TAG} shareSingle start`);
-//       await Share.shareSingle({
-//         social: Share.Social.INSTAGRAM,
-//         url: uri,           // file://… 로컬 경로
-//         failOnCancel: false,
-//       });
-//       console.log(`${TAG} shareSingle success`);
-//       sendToWeb?.('SHARE_RESULT', { success: true, platform: 'INSTAGRAM', post_id: null });
-//     } finally {
-//       try { await cleanup?.(); console.log(`${TAG} cleanup done`); } catch { console.log(`${TAG} cleanup skip`); }
-//     }
-//   } catch (err) {
-//     console.log('[IG_FEED] ERROR', String(err?.message || err));
-//     try {
-//       sendToWeb?.('SHARE_RESULT', { success: false, platform: 'INSTAGRAM', error_code: 'share_failed', message: String(err?.message || err) });
-//     } catch { }
-//     throw err; // 필요하면 얌전하게 리턴만 하고 throw 제거해도 됨
-//   }
-// }
-
 
 async function shareToInstagramFeed(payloadOrData = {}, sendToWeb) {
-  const TAG = '[IG_FEED]';
   try {
     const d = payloadOrData?.data ?? payloadOrData ?? {};
     const src = d.imageUrl || d.url || d.image;
@@ -634,38 +568,36 @@ async function shareToInstagramFeed(payloadOrData = {}, sendToWeb) {
       payloadOrData?.data?.requestId ??
       null;
 
-    // 🔹 공유 시작: "인스타 피드 공유 중" 플래그 세팅
+    // 🔹 "인스타 피드 공유 중" 플래그 세팅 (예전 그대로)
     pendingShareRef.current = {
       platform: 'INSTAGRAM',
       requestId,
-      wasBackground: false,   // 아직 백그라운드로 안 내려감
-      done: false,            // 아직 Share.shareSingle 이 성공으로 끝난 적 없음
+      wasBackground: false,
+      done: false,
     };
     lastSendToWebRef.current = sendToWeb;
 
-    // 🔹 캡션 → 클립보드
+    // 🔹 캡션 + 해시태그 → 클립보드
+    let caption = '';
     try {
-      const cap = buildFinalText({
-        caption: d.caption,
-        hashtags: d.hashtags,
-      });
-      if (cap) Clipboard.setString(cap);
+      caption =
+        buildFinalText({
+          caption: d.caption,
+          hashtags: d.hashtags,
+        }) || '';
+      if (caption) {
+        Clipboard.setString(caption);
+      }
     } catch {
       // 클립보드 실패는 무시
     }
 
-    // 🔹 이미지 로컬 JPG 확보
+    // 🔹 로컬 JPG 파일 확보 (file://...)
     const { uri, cleanup } = await ensureLocalFile(src, 'jpg');
 
     try {
-      // 🔹 인스타 피드 인텐트 실행
-      await Share.shareSingle({
-        social: Share.Social.INSTAGRAM,
-        url: uri,
-        type: 'image/jpeg',
-        filename: 'share.jpg',
-        failOnCancel: true,   // 취소 시 catch 로 감
-      });
+      // 🔹 네이티브 인스타 피드 공유 모듈 호출
+      await InstagramFeedShareModule.shareImageToFeed(uri, caption || null);
 
       // ⬇ 여기서 "성공 가능성 있음" 표시만 하고,
       // 진짜 성공 처리(웹에 SHARE_RESULT success)는 AppState 'active'에서 함
@@ -673,21 +605,42 @@ async function shareToInstagramFeed(payloadOrData = {}, sendToWeb) {
       if (cur && cur.platform === 'INSTAGRAM' && cur.requestId === requestId) {
         pendingShareRef.current = {
           ...cur,
-          done: true,   // Share.shareSingle 이 에러 없이 끝났다
+          done: true, // 네이티브 호출이 에러 없이 끝났다 = 유저가 실제 업로드 했을 가능성 있음
         };
       }
 
+      // ❌ 여기서는 sendToWeb('SHARE_RESULT', success) 보내지 않음!!
     } catch (err) {
       const msg = String(err?.message || err || '');
+      const code = String(err?.code || '');
+
+      // 인텐트 창에서 바로 취소/실패한 경우 → 대기 플래그 해제
+      pendingShareRef.current = null;
+
+      // 인스타 미설치 케이스 (네이티브에서 INSTAGRAM_NOT_INSTALLED 던짐)
+      if (code === 'INSTAGRAM_NOT_INSTALLED') {
+        alertAppMissingAndMaybeOpenStore({
+          key: 'INSTAGRAM',
+          appName: '인스타그램',
+          sendToWeb,
+          errorMessage: msg || 'Instagram app is not installed',
+        });
+
+        sendToWeb?.('SHARE_RESULT', {
+          success: false,
+          platform: 'INSTAGRAM',
+          error_code: 'app_not_installed',
+          message: msg,
+          requestId,
+        });
+        return;
+      }
+
       const isCanceled =
         err?.code === 'E_USER_CANCELLED' ||
         err?.code === 'E_SHARE_CANCELED' ||
         msg.toLowerCase().includes('cancel') ||
         msg.toLowerCase().includes('dismiss');
-
-      // ❌ 인텐트 창에서 바로 취소/실패한 경우 → 대기 플래그 해제
-      pendingShareRef.current = null;
-
 
       // 웹에 “실패/취소” 알림
       sendToWeb?.('SHARE_RESULT', {
@@ -703,7 +656,7 @@ async function shareToInstagramFeed(payloadOrData = {}, sendToWeb) {
       }, 15000);
     }
   } catch (err) {
-    // 준비 단계(이미지 없음 등)에서 에러 → 플래그 해제 + 실패 신호
+    // 준비 단계 에러
     pendingShareRef.current = null;
     sendToWeb?.('SHARE_RESULT', {
       success: false,
@@ -714,13 +667,8 @@ async function shareToInstagramFeed(payloadOrData = {}, sendToWeb) {
   }
 }
 
-
-// 전제: buildFinalText, ensureLocalPng, Clipboard, Share 가 import되어 있음
-
-// 스토리 버튼도 "인스타만 열기"로 통합 (텍스트/클립보드 없음)
+// 인스타 스토리 공유 (새 네이티브 모듈 사용 버전)
 async function shareToInstagramStories(payloadOrData = {}, sendToWeb) {
-
-  const TAG = '[IG_STORY]';
   try {
     const d = payloadOrData?.data ?? payloadOrData ?? {};
     const src = d.imageUrl || d.url || d.image;
@@ -731,78 +679,52 @@ async function shareToInstagramStories(payloadOrData = {}, sendToWeb) {
       payloadOrData?.data?.requestId ??
       null;
 
-    // 🔹 공유 시작: "인스타 스토리 공유 진행 중" 플래그
-    pendingShareRef.current = {
-      platform: 'INSTAGRAM_STORIES',
-      requestId,
-      wasBackground: false,   // 아직 백그라운드 기록 없음
-      done: false,            // 아직 Share.shareSingle 성공 안함
-    };
-    lastSendToWebRef.current = sendToWeb; // 혹시나 최신 sendToWeb 저장
-
-    // 1) 로컬 JPG 확보
+    // 1) 로컬 JPG 파일 확보 (file://... 형태)
     const { uri, cleanup } = await ensureLocalFile(src, 'jpg');
 
     try {
-      // 2) 인스타 인텐트 실행
-      await Share.shareSingle({
-        social: Share.Social.INSTAGRAM,   // 인스타 앱만 열기
-        url: uri,
-        type: 'image/jpeg',
-        filename: 'share.jpg',
-        failOnCancel: true,               // 취소 시 에러로 던지게
-      });
+      // 2) 우리가 만든 네이티브 모듈 호출
+      //    JS에서는 file://... 그대로 넘겨주면
+      //    Kotlin 쪽에서 File(..)로 바꿔서 FileProvider → Instagram으로 전달
+      await InstagramStoryShareModule.shareImageToStory(uri);
 
-      // ✅ 여기서는 "성공" 신호 보내지 않는다.
-      // 단지 "shareSingle 이 에러 없이 끝났다" = done 플래그만 세팅
-      const cur = pendingShareRef.current;
-      if (cur && cur.platform === 'INSTAGRAM_STORIES' && cur.requestId === requestId) {
-        pendingShareRef.current = {
-          ...cur,
-          done: true,
-        };
-      }
-      // 나머진 AppState('background' → 'active') 쪽에서 처리
-
-    } catch (err) {
-      // 🔹 인텐트에서 에러 / 취소
-      const msg = String(err?.message || err || '');
-      const isCanceled =
-        err?.code === 'E_USER_CANCELLED' ||
-        err?.code === 'E_SHARE_CANCELED' ||
-        msg.toLowerCase().includes('cancel') ||
-        msg.toLowerCase().includes('dismiss');
-
-      // 더 이상 대기 상태 아님
-      pendingShareRef.current = null;
-
-
-
-      // 인텐트 단계에서 바로 취소/실패 → 여기서 실패 신호 전송
+      // ✅ 네이티브 모듈이 에러 없이 resolve 되면 "성공"으로 처리
       sendToWeb?.('SHARE_RESULT', {
-        success: false,
+        success: true,
         platform: 'INSTAGRAM_STORIES',
-        error_code: isCanceled ? 'share_canceled' : 'share_failed',
-        message: msg,
+        error_code: null,
+        message: null,
         requestId,
       });
-    } finally {
+    } catch (e) {
+        // ❌ 네이티브 모듈에서 reject 된 경우
+        const msg = String(e?.message || e);
+        const code = e?.code || 'INSTAGRAM_STORY_ERROR';
+
+        sendToWeb?.('SHARE_RESULT', {
+          success: false,
+          platform: 'INSTAGRAM_STORIES',
+          error_code: code,
+          message: msg,
+          requestId,
+        });
+      } finally {
+      // 캐시 파일 정리 (조금 여유 두고)
       setTimeout(() => {
         cleanup().catch(() => {});
       }, 15000);
     }
   } catch (err) {
     // 준비 단계 에러 (이미지 없음 등)
-    pendingShareRef.current = null;
+    const msg = String(err?.message || err);
     sendToWeb?.('SHARE_RESULT', {
       success: false,
       platform: 'INSTAGRAM_STORIES',
       error_code: 'share_failed',
-      message: String(err?.message || err),
+      message: msg,
     });
   }
 }
-
 
 
 
@@ -835,7 +757,7 @@ const App = () => {
   const [splashAnimDone, setSplashAnimDone] = useState(false);
 
   // 두 조건 다 true일 때만 스플래시를 숨기는 함수
-  const tryHideSplash = useCallback(() => {
+  useEffect(() => {
     if (!webReadyDone || !splashAnimDone) return;
 
     Animated.timing(splashFade, {
@@ -1753,6 +1675,7 @@ function shouldAllowWebRequest(req) {
 
 
         case 'WEB_LOADING_DONE': {
+          console.log('[RN] tryHideSplash 호출')
           if (bootTORef.current) {
             clearTimeout(bootTORef.current);
             bootTORef.current = null;
@@ -1762,7 +1685,7 @@ function shouldAllowWebRequest(req) {
           setWebReadyDone(true);
 
           // 👉 애니메이션도 끝났다면 지금 바로 스플래시 내림
-          tryHideSplash();
+          // tryHideSplash();
           break;
         }
 
@@ -2167,9 +2090,8 @@ function shouldAllowWebRequest(req) {
             <SplashScreenRN
                   brandBg="#272930"
                   onFirstCycleEnd={() => {
-                  setSplashAnimDone(true);
-                   tryHideSplash();
-                  }}
+                      setSplashAnimDone(true);   // ✅ 이것만
+                    }}
                 />
           </SafeAreaInsetOverlay>
         )}
