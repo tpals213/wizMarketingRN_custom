@@ -823,6 +823,64 @@ const App = () => {
 
 
 
+    // 푸시 이벤트 처리
+    // ✅ 푸시 클릭으로 들어온 route 임시 보관
+    const pendingNavRef = useRef(null);
+    const webBridgeReadyRef = useRef(false);
+
+    const storePendingNav = (route, meta = {}) => {
+      if (!route) return;
+      pendingNavRef.current = { route: String(route), ...meta, at: Date.now() };
+    };
+
+    const flushPendingNav = () => {
+      if (!webBridgeReadyRef.current) return;
+      const p = pendingNavRef.current;
+      if (!p?.route) return;
+
+      console.log("[flushPendingNav] ✅ send PUSH_NAVIGATE", p.route);
+      // ✅ 웹으로 route 전달
+      sendToWeb('PUSH_NAVIGATE', {
+        action: 'navigate',
+        route: p.route,
+        source: p.source || 'unknown',
+        at: p.at,
+      });
+
+      pendingNavRef.current = null; // 1회성
+    };
+
+    useEffect(() => {
+      const handleOpen = (remoteMessage, source) => {
+        const route =
+          remoteMessage?.data?.route ||
+          remoteMessage?.data?.deeplink ||   // 혹시 기존 키가 deeplink면 이것도 커버
+          '';
+
+        if (!route) return;
+
+        storePendingNav(route, { source, messageId: remoteMessage?.messageId });
+        flushPendingNav(); // 웹 준비됐으면 즉시 전달
+      };
+
+      // ✅ 앱이 백그라운드였다가 푸시 눌러서 열린 경우
+      const unsub = messaging().onNotificationOpenedApp((rm) => {
+        handleOpen(rm, 'background');
+      });
+
+      // ✅ 앱이 완전 종료 상태였다가 푸시 눌러서 열린 경우
+      messaging().getInitialNotification().then((rm) => {
+        if (rm) handleOpen(rm, 'quit');
+      });
+
+      return unsub;
+    }, [sendToWeb]);
+
+
+
+
+
+
   // ─────────── 외부앱/새창 처리 헬퍼 ───────────
 const isHttpLike = (u = '') => /^https?:\/\//i.test(u);
 const isExternalScheme = (u = '') =>
@@ -1094,48 +1152,79 @@ function shouldAllowWebRequest(req) {
     }, [sendToWeb]);
 
     // 인스타 공유 후, 앱으로 복귀했을 때 final로 넘어가게 하는 리스너
+    // 인스타 공유 INTENT → 앱 복귀 시 최종 페이지로 보내는 리스너
     useEffect(() => {
-      const sub = AppState.addEventListener('change', (state) => {
-        const pending = pendingShareRef.current;
-        const sendToWeb = lastSendToWebRef.current;
+        let prevState = AppState.currentState;
 
-        // 진행 중 공유가 없거나, 웹쪽으로 보낼 통로가 없으면 무시
-        if (!pending || !sendToWeb) return;
+        const sub = AppState.addEventListener('change', (nextState) => {
+            const pending = pendingShareRef.current;
+            const sendToWeb = lastSendToWebRef.current;
 
-        if (state === 'background') {
-          // 인스타/공유 인텐트로 나갈 때: background 기록
-          pendingShareRef.current = {
-            ...pending,
-            wasBackground: true,
-          };
-          return;
-        }
+            // 진행 중 공유가 없거나, 웹으로 보낼 통로가 없으면 무시
+            if (!pending || !sendToWeb) {
+                prevState = nextState;
+                return;
+            }
 
-        if (state === 'active') {
-          // ✨ 여기서 핵심: "진짜 성공" 기준
-          // 1) 공유 함수에서 Share.shareSingle 이 성공으로 끝남 → pending.done === true
-          // 2) 그 사이에 한번 background 를 거쳤음 → pending.wasBackground === true
-          if (pending.wasBackground && pending.done) {
-            const { platform, requestId } = pending;
+            // 🔹 인스타 피드 공유만 처리 (스토리 등은 기존 로직 유지)
+            if (pending.platform !== 'INSTAGRAM') {
+                prevState = nextState;
+                return;
+            }
 
-            // 더 이상 대기 상태 아님
-            pendingShareRef.current = null;
+            // 1) 인스타 INTENT 로 빠져나갈 때: background 표시
+            if (nextState === 'background') {
+                pendingShareRef.current = {
+                    ...pending,
+                    wasBackground: true,
+                };
+                prevState = nextState;
+                return;
+            }
 
-            // 웹으로 성공 신호
-            sendToWeb('SHARE_RESULT', {
-              success: true,
-              platform,      // 'INSTAGRAM' or 'INSTAGRAM_STORIES'
-              requestId,
-              source: 'resume', // 디버깅용
-            });
-          }
-        }
-      });
+            // 2) 인스타에서 나와서 우리 앱으로 돌아온 순간: background → active
+            if (prevState === 'background' && nextState === 'active') {
+                const { platform, requestId, wasBackground, done } = pending;
 
-      return () => {
-        sub.remove();
-      };
+                // ✅ INTENT 가 실제로 떴다가(= background 됐다가) 돌아온 경우만 성공 처리
+                //   - done === true : InstagramFeedShareModule 호출이 에러 없이 끝남
+                //   - wasBackground === true : INTENT 동안 앱이 백그라운드로 나갔다 옴
+                if (wasBackground && done) {
+                    // 더 이상 대기 상태 아님
+                    pendingShareRef.current = null;
+
+                    // 웹으로 성공 신호 전송 → 웹에서 final 페이지로 이동
+                    sendToWeb('SHARE_RESULT', {
+                        success: true,
+                        platform,      // 'INSTAGRAM'
+                        requestId,
+                        source: 'appstate_resume',  // 디버깅용
+                    });
+                } else {
+                    // (선택) 여기에서 취소/실패로 간주하고 싶으면 아래처럼 보낼 수도 있음
+                    // sendToWeb('SHARE_RESULT', {
+                    //     success: false,
+                    //     platform,
+                    //     requestId,
+                    //     cancelled: true,
+                    //     error_code: 'share_canceled_or_not_started',
+                    // });
+                    // pendingShareRef.current = null;
+                }
+
+                prevState = nextState;
+                return;
+            }
+
+            // 그 외 상태 변화는 무시
+            prevState = nextState;
+        });
+
+        return () => {
+            sub.remove();
+        };
     }, []);
+
 
 
 
@@ -1181,6 +1270,9 @@ function shouldAllowWebRequest(req) {
       at: Date.now(),
       install_id: installId ?? 'unknown',
     });
+
+     webBridgeReadyRef.current = true;  // ✅ 추가
+      flushPendingNav();                 // ✅ 추가
 
     // ⛔ 여기서는 스플래시를 내리지 않는다
     // 스플래시 hide는 WEB_LOADING_DONE 기준으로만 처리
@@ -1679,8 +1771,9 @@ function shouldAllowWebRequest(req) {
           if (bootTORef.current) {
             clearTimeout(bootTORef.current);
             bootTORef.current = null;
-          }
 
+          }
+            flushPendingNav();
           // 👉 웹은 준비 완료
           setWebReadyDone(true);
 
