@@ -7,6 +7,7 @@
         <package android:name="com.kakao.talk" />
         <package android:name="com.instagram.android" />
         <package android:name="com.nhn.android.band"/>
+        <package android:name="com.twitter.android" />
         <intent>
             <action android:name="android.intent.action.SEND" />
             <data android:mimeType="image/*" />

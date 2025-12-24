@@ -18,6 +18,9 @@ import com.wizmarket.share.BandSharePackage
 import com.wizmarket.share.AppUtilPackage
 import com.wizmarket.share.InstagramStorySharePackage
 import com.wizmarket.share.InstagramFeedSharePackage
+import com.wizmarket.share.XSharePackage
+import com.wizmarket.share.MmsSharePackage
+
 class MainApplication : Application(), ReactApplication {
 
   override val reactNativeHost: ReactNativeHost =
@@ -31,6 +34,8 @@ class MainApplication : Application(), ReactApplication {
               // packages.add(CameraRollPackage())
                 packages.add(KakaoSharePackage())
                 packages.add(BandSharePackage())
+                packages.add(XSharePackage())
+                packages.add(MmsSharePackage())
                 packages.add(InstagramStorySharePackage())
                 packages.add(InstagramFeedSharePackage())
                 packages.add(AppUtilPackage())

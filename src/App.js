@@ -30,9 +30,10 @@ const { KakaoLoginModule } = NativeModules;
 const { AppUtilModule } = NativeModules;
 const { InstagramStoryShareModule } = NativeModules;
 const { InstagramFeedShareModule } = NativeModules;
+const { XShareModule } = NativeModules;
+const { MmsShare } = NativeModules;
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DeviceInfo from 'react-native-device-info';
-
 // App.js 상단 import들 사이에 추가
 import { Modal, View, Text, Pressable, TouchableWithoutFeedback } from 'react-native';
 import { launchCamera, launchImageLibrary } from 'react-native-image-picker';
@@ -153,6 +154,7 @@ const SOCIAL_MAP = {
   KAKAO: 'KAKAO',
   NAVER: 'NAVER',
   BAND: 'BAND',
+  X:'X',
   SYSTEM: 'SYSTEM',
 };
 
@@ -340,6 +342,7 @@ const ANDROID_PACKAGE_MAP = {
   FACEBOOK: 'com.facebook.katana',
   KAKAO: 'com.kakao.talk',
   BAND: 'com.nhn.android.band',
+  X: 'com.twitter.android', // ✅ 추가
 };
 
 const ANDROID_STORE_URL_MAP = {
@@ -348,6 +351,7 @@ const ANDROID_STORE_URL_MAP = {
   FACEBOOK: 'https://play.google.com/store/apps/details?id=com.facebook.katana',
   KAKAO: 'https://play.google.com/store/apps/details?id=com.kakao.talk',
   BAND: 'https://play.google.com/store/apps/details?id=com.nhn.android.band',
+  X: 'https://play.google.com/store/apps/details?id=com.twitter.android', // ✅ 추가
 };
 
 async function openStoreForSocial(key: string) {
@@ -417,7 +421,24 @@ function alertAppMissingAndMaybeOpenStore({
   );
 }
 
+let pendingMmsShare = null;   // { key: 'MMS', sendToWeb } 같은거 저장
+let appStateSub = null;
 
+function ensureMmsAppStateListener() {
+  if (appStateSub) return;
+
+  appStateSub = AppState.addEventListener('change', (nextState) => {
+    if (!pendingMmsShare) return;
+
+    if (nextState === 'background' || nextState === 'inactive') {
+      const snap = pendingMmsShare;   // ✅ 스냅샷
+      pendingMmsShare = null;         // ✅ 먼저 비워서 2번 호출 방지
+
+      const { sendToWeb, key } = snap;
+      sendToWeb('SHARE_RESULT', { success: true, platform: key, post_id: null });
+    }
+  });
+}
 
 // 공유 핸들러(중략 없이 유지)
 async function handleShareToChannel(payload, sendToWeb) {
@@ -427,39 +448,48 @@ async function handleShareToChannel(payload, sendToWeb) {
   const text = buildFinalText(data);
   let file = data.imageUrl || data.url || data.image;
 
+  console.log('[SHARE] payload.social=', payload?.social, ' -> key=', key);
+
   try {
-
     // 0) 인스타 / 인스타 스토리는 먼저 "앱 설치 여부" 검사
-        if (key === 'INSTAGRAM' || key === 'INSTAGRAM_STORIES') {
-          let installed = true;
-          try {
-            installed = await AppUtilModule.isAppInstalled('com.instagram.android');
-          } catch (e) {
-            console.warn('[SHARE] isAppInstalled error:', e);
-            // 여기서 false로 두면 네이티브 에러 때문에 괜히 스토어로 튈 수 있으니 true 유지
-            installed = true;
-          }
+    if (key === 'INSTAGRAM' || key === 'INSTAGRAM_STORIES') {
+      let installed = true;
+      try {
+        installed = await AppUtilModule.isAppInstalled('com.instagram.android');
+      } catch (e) {
+        console.warn('[SHARE] isAppInstalled error:', e);
+        installed = true;
+      }
 
-          if (!installed) {
-            alertAppMissingAndMaybeOpenStore({
-              key,
-              appName: '인스타그램',
-              sendToWeb,
-              errorMessage: 'instagram_app_not_installed',
-            });
-            return;
-          }
-        }
+      if (!installed) {
+        alertAppMissingAndMaybeOpenStore({
+          key,
+          appName: '인스타그램',
+          sendToWeb,
+          errorMessage: 'instagram_app_not_installed',
+        });
+        return;
+      }
+    }
 
-    const needClipboard = [Share.Social.INSTAGRAM, Share.Social.INSTAGRAM_STORIES, Share.Social.FACEBOOK].includes(social);
-    if (needClipboard && text) { Clipboard.setString(text); sendToWeb('TOAST', { message: '캡션이 복사되었어요. 업로드 화면에서 붙여넣기 하세요.' }); }
+    const needClipboard =
+      [Share.Social.INSTAGRAM, Share.Social.INSTAGRAM_STORIES, Share.Social.FACEBOOK].includes(social) ||
+      key === 'X' || key === 'TWITTER';
+
+    if (needClipboard && text) {
+      Clipboard.setString(text);
+      sendToWeb('TOAST', { message: '캡션이 복사되었어요. 업로드 화면에서 붙여넣기 하세요.' });
+    }
+
     const ext = guessExt(file) || 'jpg';
     const mime = extToMime(ext) || 'image/*';
 
     if (key === 'INSTAGRAM') {
       await shareToInstagramFeed(payload, sendToWeb);
+
     } else if (key === 'INSTAGRAM_STORIES') {
       await shareToInstagramStories(payload, sendToWeb);
+
     } else if (key === 'KAKAO') {
       const src = data.imageUrl || data.url || data.image;
       const cleanText = safeStr(text);
@@ -471,59 +501,137 @@ async function handleShareToChannel(payload, sendToWeb) {
       const st = await RNFS.stat(dlPath);
       if (!st.isFile() || Number(st.size) <= 0) throw new Error('downloaded-file-empty');
       const fileUrl = `file://${dlPath}`;
-      // const kMime = extToMime(kExt) || 'image/*';
-      // await Share.open({ title: '카카오톡으로 공유', url: fileUrl, type: kMime, filename: `share.${kExt}`, message: pasteText, failOnCancel: false });
+
       try {
-          const { KakaoShareModule } = NativeModules;
-          await KakaoShareModule.shareImageFile(fileUrl, pasteText);
+        const { KakaoShareModule } = NativeModules;
+        await KakaoShareModule.shareImageFile(fileUrl, pasteText);
+        sendToWeb('SHARE_RESULT', { success: true, platform: key, post_id: null });
+      } catch (e) {
+        alertAppMissingAndMaybeOpenStore({
+          key,
+          appName: '카카오톡',
+          sendToWeb,
+          errorMessage: String(e?.message || e),
+        });
+      }
+      return;
 
-          sendToWeb('SHARE_RESULT', { success: true, platform: key, post_id: null });
-        } catch (e) {
-          // 🔥 여기서 카카오 미설치 → 플레이스토어 이동
-          alertAppMissingAndMaybeOpenStore({
-                    key,
-                    appName: '카카오톡',
-                    sendToWeb,
-                    errorMessage: String(e?.message || e),
-                  });
-        }
-
-        return;
     } else if (key === 'BAND') {
       const src = data.imageUrl || data.url || data.image;
       if (!src) throw new Error('no_image_for_band');
 
-      const { uri } = await ensureLocalFile(src, 'jpg'); // file://...
+      const { uri } = await ensureLocalFile(src, 'jpg');
       const cleanText = buildFinalText(data) || '';
 
       try {
-        // ✅ 네이티브 모듈로 “밴드만” 실행
         const { BandShareModule } = NativeModules;
         await BandShareModule.shareImageWithText(uri, cleanText);
         sendToWeb('SHARE_RESULT', { success: true, platform: key, post_id: null });
       } catch (e) {
-        // 미설치면 store로 이동 시도 → 여기로 reject 들어옴
         console.warn('[BAND_SHARE] error:', e);
-                alertAppMissingAndMaybeOpenStore({
-                  key,
-                  appName: '밴드',
-                  sendToWeb,
-                  errorMessage: String(e?.message || e),
-                });
+        alertAppMissingAndMaybeOpenStore({
+          key,
+          appName: '밴드',
+          sendToWeb,
+          errorMessage: String(e?.message || e),
+        });
       }
       return;
-    }
 
-     else {
-      await Share.open({ url: file, message: text, title: '공유', type: mime, filename: `share.${ext}`, failOnCancel: false });
+    } else if (key === 'MMS') {
+      if (pendingMmsShare) {
+          // 이미 진행 중이면 무시하거나 토스트만
+          sendToWeb('TOAST', { message: '공유를 준비 중이에요.' });
+          return;
+        }
+      const src = data.imageUrl || data.url || data.image;
+      if (!src) throw new Error('no_image_for_mms');
+
+      const { uri } = await ensureLocalFile(src, guessExt(src) || 'jpg');
+
+      try {
+          // ✅ 1) 리스너 준비
+          ensureMmsAppStateListener();
+
+          // ✅ 2) 성공 신호는 "background 감지 시점"에 보내기 위해 대기 상태로 저장
+          pendingMmsShare = { key, sendToWeb };
+
+          // ✅ 3) 메시지 앱 열기만 실행
+          await MmsShare.shareImageOnly(uri);
+
+          // ❌ 여기서 성공 sendToWeb 하지 않는다
+          // (background 이벤트가 오면 그때 성공을 보냄)
+
+        } catch (e) {
+          pendingMmsShare = null; // 실패면 pending 제거
+          sendToWeb('SHARE_RESULT', {
+            success: false,
+            platform: key,
+            error_code: 'share_failed',
+            message: String(e?.message || e),
+          });
+        }
+        return;
+
+    } else if (key === 'X' || key === 'TWITTER') {
+      let installed = true;
+      try {
+        installed = await AppUtilModule.isAppInstalled('com.twitter.android');
+      } catch (e) {
+        console.warn('[SHARE] isAppInstalled error:', e);
+        installed = true;
+      }
+
+      if (!installed) {
+        alertAppMissingAndMaybeOpenStore({
+          key,
+          appName: 'X',
+          sendToWeb,
+          errorMessage: 'x_app_not_installed',
+        });
+        return;
+      }
+
+      const src = data.imageUrl || data.url || data.image;
+      if (!src) throw new Error('no_image_for_x');
+
+      const { uri } = await ensureLocalFile(src, guessExt(src) || 'jpg');
+
+      try {
+        await XShareModule.shareImageWithText(uri, text || '');
+        sendToWeb('SHARE_RESULT', { success: true, platform: key, post_id: null });
+      } catch (e) {
+        alertAppMissingAndMaybeOpenStore({
+          key,
+          appName: 'X',
+          sendToWeb,
+          errorMessage: String(e?.message || e),
+        });
+      }
+      return;
+
+    } else {
+      await Share.open({
+        url: file,
+        message: text,
+        title: '공유',
+        type: mime,
+        filename: `share.${ext}`,
+        failOnCancel: false,
+      });
       sendToWeb('SHARE_RESULT', { success: true, platform: key, post_id: null });
     }
 
-
   } catch (err) {
-    sendToWeb('SHARE_RESULT', { success: false, platform: key, error_code: 'share_failed', message: String(err?.message || err) });
+    sendToWeb('SHARE_RESULT', {
+      success: false,
+      platform: key,
+      error_code: 'share_failed',
+      message: String(err?.message || err),
+    });
   }
 }
+
 
 // dataURL 저장
 async function saveDataUrlToGallery(dataUrl, filename) {
